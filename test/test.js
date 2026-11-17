@@ -6,10 +6,12 @@ const near = (name, got, exp, tol) => { const ok = Math.abs(got - exp) <= tol; i
 const truthy = (name, ok, info) => { if (!ok) fails++; console.log(`${ok ? 'PASS' : 'FAIL'} ${name}${info ? ': ' + info : ''}`); };
 
 // Runs the same pipeline as the live screen. drop: fraction of camera frames skipped.
-function runLive({ view = 'side', dir = 1, cad = 90, secs = 14, only = null, drop = 0, camFps = 30 }) {
+function runLive({ view = 'side', dir = 1, cad = 90, secs = 14, only = null, drop = 0, camFps = 30, ro = null }) {
   const poseAt = t => (view === 'side' ? sidePose(t, dir, cad) : frontPose(t, cad));
   const p0 = poseAt(0), key = view === 'side' ? 'knee' : 'kneeL';
-  const spec = BF.sampleColor(render(p0, 1, only), W, H, Math.round(p0[key][0]), Math.round(p0[key][1]), 1);
+  const model = BF.learnColor(render(p0, 1, only, ro), W, H, p0[key][0] + 1, p0[key][1] - 1);
+  const at = BF.autoTolerance(render(p0, 2, only, ro), W, H, model, view === 'side' ? [4, 5, 7] : [4]);
+  if (at.tol) model.tol = at.tol;
   let sk = 5;
   const ses = BF.createSession(view, W);
   let labelledAt = null, relabels = 0, was = false;
@@ -17,7 +19,7 @@ function runLive({ view = 'side', dir = 1, cad = 90, secs = 14, only = null, dro
   for (let f = 0; f < secs * camFps; f++) {
     const t = f / camFps;
     if (drop && f > 0 && ((sk = (sk * 69069 + 1) % 1000) < drop * 1000)) continue;
-    const out = ses.step(BF.findBlobs(render(poseAt(t), f + 7, only), W, H, spec, { minArea: 6 }), t);
+    const out = ses.step(BF.findBlobs(render(poseAt(t), f + 7, only, ro), W, H, model), t);
     if (out.state === 'track') { if (!was) { relabels++; if (labelledAt == null) labelledAt = t; } frames.push({ t, pts: out.pts }); }
     was = out.state === 'track';
   }
@@ -28,7 +30,7 @@ function runLive({ view = 'side', dir = 1, cad = 90, secs = 14, only = null, dro
   const uni = BF.resample(frames, labels, 30);
   const win = uni.slice(-300);
   const res = view === 'side' ? BF.analyzeSide(win, { fps: 30, crankMm: 172.5, dir: labelDir }) : BF.analyzeFront(win, { fps: 30, crankMm: 172.5 });
-  return { res, map, labelledAt, wrong, seen, swapsFixed, poseAt, labelDir };
+  return { res, map, labelledAt, wrong, seen, swapsFixed, poseAt, labelDir, tol: model.tol };
 }
 function truthSide(dir, cad) {
   const k = [], h = [], tr = [];
@@ -93,12 +95,12 @@ near('left knee travel (mm)', r.res.metrics.kneeTravelL, 6 * 172.5 / 40, 6);
 
 console.log('--- rider gets off for 4 s, then pedals again');
 {
-  const p0 = sidePose(0, 1, 90), spec = BF.sampleColor(render(p0, 1), W, H, Math.round(p0.knee[0]), Math.round(p0.knee[1]), 1);
+  const p0 = sidePose(0, 1, 90), spec = BF.learnColor(render(p0, 1), W, H, p0.knee[0], p0.knee[1]);
   const ses = BF.createSession('side', W);
   let lostAt = null, backAt = null, wrong = 0, was = false;
   for (let f = 0; f < 16 * 30; f++) {
     const t = f / 30, away = t >= 6 && t < 10, p = sidePose(t, 1, 90);
-    const out = ses.step(BF.findBlobs(render(p, f + 7, away ? [] : null), W, H, spec, { minArea: 6 }), t);
+    const out = ses.step(BF.findBlobs(render(p, f + 7, away ? [] : null), W, H, spec), t);
     const on = out.state === 'track';
     if (was && !on && lostAt == null) lostAt = t;
     if (!was && on && lostAt != null && backAt == null) backAt = t;
@@ -108,6 +110,29 @@ console.log('--- rider gets off for 4 s, then pedals again');
   truthy('loss noticed', lostAt != null && lostAt < 8.5, lostAt != null ? `at ${lostAt.toFixed(1)} s` : 'never');
   truthy('found again without help', backAt != null && backAt < 13.5, backAt != null ? `at ${backAt.toFixed(1)} s` : 'never');
   truthy('labels correct after return', wrong === 0, `${wrong} wrong`);
+}
+
+console.log('--- detection in a realistic room: blue stickers, bluish wall, navy shorts, blue bottle and jeans');
+{
+  const BLUE = [30, 95, 225];
+  for (const r of [4, 5, 7]) {
+    const ro = { hard: true, color: BLUE, r }, p = sidePose(0.3, 1, 90), img = render(p, 11, null, ro);
+    const m = BF.learnColor(img, W, H, p.knee[0] + 2, p.knee[1] + 1);
+    const at = BF.autoTolerance(img, W, H, m, [4, 5, 7]);
+    let ok = 0;
+    for (let f = 0; f < 30; f++) {
+      const q = sidePose(f / 30, 1, 90), bl = BF.findBlobs(render(q, 100 + f, null, ro), W, H, Object.assign({}, m, { tol: at.tol || 1 }));
+      if (bl.length === 7 && BF.SIDE_LABELS.every(l => bl.some(b => Math.hypot(b.x - q[l][0], b.y - q[l][1]) < 2.5))) ok++;
+    }
+    truthy(`sticker radius ${r} px: all 7 found, nothing else`, ok >= 29, `${ok}/30 frames, tolerance ${at.tol}, counts by tolerance ${at.counts.join('/')}`);
+  }
+  const ro = { hard: true, color: BLUE }, r = runLive({ ro }), tr = truthSide(1, 90);
+  truthy('labelled automatically', !!r.map, `tolerance ${r.tol}`);
+  truthy('labels correct', r.wrong === 0, `${r.wrong} wrong of ${r.seen}`);
+  near('knee extension', r.res.metrics.kneeExt, tr.ext, 1.5);
+  near('hip closed', r.res.metrics.hipMin, tr.hip, 1.5);
+  const p = sidePose(0, 1, 90);
+  truthy('tap on a grey wall is refused', BF.learnColor(render(p, 3, null, ro), W, H, 320, 40) === null);
 }
 
 console.log('--- recommendation');

@@ -17,64 +17,147 @@ const BF = (function () {
     return { h, s: mx === 0 ? 0 : d / mx, v: mx };
   }
 
-  // Average colour in a (2r+1)^2 window -> colour spec used for thresholding.
-  function sampleColor(data, w, h, x, y, r) {
-    r = r || 2;
-    let R = 0, G = 0, B = 0, n = 0;
-    for (let yy = Math.max(0, y - r); yy <= Math.min(h - 1, y + r); yy++)
-      for (let xx = Math.max(0, x - r); xx <= Math.min(w - 1, x + r); xx++) {
-        const i = (yy * w + xx) * 4; R += data[i]; G += data[i + 1]; B += data[i + 2]; n++;
-      }
-    const c = rgbToHsv(R / n, G / n, B / n);
-    return { h: c.h, s: c.s, v: c.v, tol: 1 };
-  }
-
   function hueDist(a, b) { const d = Math.abs(a - b) % 360; return d > 180 ? 360 - d : d; }
+  function pctl(a, q) { const b = a.slice().sort((x, y) => x - y); return b.length ? b[Math.min(b.length - 1, Math.max(0, Math.round(q * (b.length - 1))))] : NaN; }
 
-  // tol scales all thresholds (0.5 strict .. 2 loose)
-  function makeMatcher(spec) {
-    const t = spec.tol || 1;
-    const hTol = 16 * t;
-    const sMin = Math.max(0.18, spec.s * (1 - 0.45 * t));
-    const vMin = Math.max(0.15, spec.v * (1 - 0.55 * t));
-    return function (r, g, b) {
-      const mx = Math.max(r, g, b), mn = Math.min(r, g, b);
-      if (mx / 255 < vMin) return false;
-      const d = mx - mn;
-      if (mx === 0 || d / mx < sMin) return false;
-      let h;
-      if (mx === r) h = ((g - b) / d) % 6; else if (mx === g) h = (b - r) / d + 2; else h = (r - g) / d + 4;
-      h *= 60; if (h < 0) h += 360;
-      return hueDist(h, spec.h) <= hTol;
+  // Colour model of the stickers, learned from one tap.
+  // Colour is compared as chromaticity: two opponent channels divided by brightness, so the shaded and
+  // the lit side of a sticker look the same, while a bluish wall, navy shorts or skin look different.
+  // Pixels darker than the darkest part of the sticker are ignored: their colour is mostly noise.
+  function learnColor(data, w, h, x, y) {
+    x = Math.round(x); y = Math.round(y);
+    const rad = Math.max(4, Math.round(w / 60));
+    let sx = x, sy = y, best = -1;
+    for (let yy = Math.max(0, y - rad); yy <= Math.min(h - 1, y + rad); yy++) for (let xx = Math.max(0, x - rad); xx <= Math.min(w - 1, x + rad); xx++) {
+      const i = (yy * w + xx) * 4, c = rgbToHsv(data[i], data[i + 1], data[i + 2]), sc = c.s * c.v;
+      if (sc > best) { best = sc; sx = xx; sy = yy; }
+    }
+    const i0 = (sy * w + sx) * 4, seed = rgbToHsv(data[i0], data[i0 + 1], data[i0 + 2]);
+    if (seed.s < 0.25 || seed.v < 0.2) return null;
+    // seed colour = average of the 3x3 around the most colourful pixel
+    let R = 0, G = 0, B = 0, k = 0;
+    for (let yy = Math.max(0, sy - 1); yy <= Math.min(h - 1, sy + 1); yy++) for (let xx = Math.max(0, sx - 1); xx <= Math.min(w - 1, sx + 1); xx++) {
+      const j = (yy * w + xx) * 4, c = rgbToHsv(data[j], data[j + 1], data[j + 2]);
+      if (c.s * c.v < best * 0.6) continue; // skip glare and background next to the seed
+      R += data[j]; G += data[j + 1]; B += data[j + 2]; k++;
+    }
+    const seedI = (R + G + B) / k + 1, seedX = (R - G) / k / seedI, seedY = (R + G - 2 * B) / k / seedI, seedM = Math.hypot(seedX, seedY);
+    // grow the sticker region from the seed
+    const lim = Math.max(8, Math.round(w / 18)), seen = new Set([sy * w + sx]), q = [sy * w + sx], px = [];
+    let minx = sx, maxx = sx, miny = sy, maxy = sy;
+    while (q.length && px.length < 5000) {
+      const p = q.pop(), qx = p % w, qy = (p - qx) / w;
+      px.push(p);
+      minx = Math.min(minx, qx); maxx = Math.max(maxx, qx); miny = Math.min(miny, qy); maxy = Math.max(maxy, qy);
+      [[1, 0], [-1, 0], [0, 1], [0, -1]].forEach(([dx, dy]) => {
+        const nx = qx + dx, ny = qy + dy, np = ny * w + nx;
+        if (nx < 0 || ny < 0 || nx >= w || ny >= h || Math.abs(nx - sx) > lim || Math.abs(ny - sy) > lim || seen.has(np)) return;
+        seen.add(np);
+        const j = np * 4, r = data[j], g = data[j + 1], b = data[j + 2], s = r + g + b + 1;
+        if (s >= seedI * 0.5 && Math.hypot((r - g) / s - seedX, (r + g - 2 * b) / s - seedY) <= 0.15 + 0.12 * seedM) q.push(np);
+      });
+    }
+    if (px.length < 5) return null;
+    const fx = [], fy = [], fi = [];
+    px.forEach(p => { const j = p * 4, r = data[j], g = data[j + 1], b = data[j + 2], s = r + g + b + 1; fx.push((r - g) / s); fy.push((r + g - 2 * b) / s); fi.push(s); });
+    const mx = fx.reduce((t, v) => t + v, 0) / fx.length, my = fy.reduce((t, v) => t + v, 0) / fy.length;
+    let sxx = 0, sxy = 0, syy = 0;
+    fx.forEach((v, k) => { const dx = v - mx, dy = fy[k] - my; sxx += dx * dx; sxy += dx * dy; syy += dy * dy; });
+    // Allowed spread: stickers lit differently keep their hue but vary in saturation (dark ones look more
+    // saturated, glare less), so the floor is wide along the saturation direction and narrow across it.
+    const n = fx.length, mag = Math.hypot(mx, my) || 1, ux = mx / mag, uy = my / mag;
+    const sr = 0.04 + 0.13 * mag, st = 0.035;
+    sxx = sxx / n + st * st + (sr * sr - st * st) * ux * ux;
+    syy = syy / n + st * st + (sr * sr - st * st) * uy * uy;
+    sxy = sxy / n + (sr * sr - st * st) * ux * uy;
+    const det = sxx * syy - sxy * sxy;
+    return {
+      mx, my, ixx: syy / det, ixy: -sxy / det, iyy: sxx / det,
+      iMin: Math.max(40, 0.35 * pctl(fi, 0.1)),
+      area: n, size: Math.max(maxx - minx + 1, maxy - miny + 1), h: seed.h, tol: 1, x: sx, y: sy,
     };
   }
 
-  // Connected components on the colour mask. Returns [{x,y,area}] sorted by area desc.
-  let _mask = null, _stack = null; // reused between frames: a live camera calls this 30 times a second
-  function findBlobs(data, w, h, spec, opts) {
-    opts = opts || {};
-    const minArea = opts.minArea || 4, maxArea = opts.maxArea || (w * h) / 50;
-    const match = makeMatcher(spec);
-    if (!_mask || _mask.length !== w * h) { _mask = new Uint8Array(w * h); _stack = new Int32Array(w * h); }
-    const mask = _mask, stack = _stack;
-    for (let i = 0, p = 0; p < w * h; p++, i += 4) mask[p] = match(data[i], data[i + 1], data[i + 2]) ? 1 : 0;
-    const blobs = [];
-    for (let p = 0; p < w * h; p++) {
-      if (mask[p] !== 1) continue;
-      let sp = 0, area = 0, sx = 0, sy = 0;
-      stack[sp++] = p; mask[p] = 2;
-      while (sp) {
-        const q = stack[--sp], qx = q % w, qy = (q - qx) / w;
-        area++; sx += qx; sy += qy;
-        if (qx > 0 && mask[q - 1] === 1) { mask[q - 1] = 2; stack[sp++] = q - 1; }
-        if (qx < w - 1 && mask[q + 1] === 1) { mask[q + 1] = 2; stack[sp++] = q + 1; }
-        if (qy > 0 && mask[q - w] === 1) { mask[q - w] = 2; stack[sp++] = q - w; }
-        if (qy < h - 1 && mask[q + w] === 1) { mask[q + w] = 2; stack[sp++] = q + w; }
-      }
-      if (area >= minArea && area <= maxArea) blobs.push({ x: sx / area + 0.5, y: sy / area + 0.5, area });
+  // Connected groups of sticker-coloured pixels. Returns accepted blobs [{x,y,area}], largest first.
+  // A blob is accepted when it is roughly round and about the size of the sticker that was tapped;
+  // opts.rejected (an array) receives the others, for drawing.
+  let _mask = null, _tmp = null, _stack = null, _pix = null, _d = null; // reused between frames: a live camera calls this 30 times a second
+  // Flood-fills one group from p in `mask` (cells === 1 become 2); collects pixel indices into _pix from `off`.
+  function fill(mask, w, h, p, off) {
+    const stack = _stack, pix = _pix;
+    let sp = 0, area = 0, sx = 0, sy = 0, x0 = w, x1 = 0, y0 = h, y1 = 0;
+    stack[sp++] = p; mask[p] = 2;
+    while (sp) {
+      const q = stack[--sp], qx = q % w, qy = (q - qx) / w;
+      pix[off + area] = q; area++; sx += qx; sy += qy;
+      if (qx < x0) x0 = qx; if (qx > x1) x1 = qx; if (qy < y0) y0 = qy; if (qy > y1) y1 = qy;
+      if (qx > 0 && mask[q - 1] === 1) { mask[q - 1] = 2; stack[sp++] = q - 1; }
+      if (qx < w - 1 && mask[q + 1] === 1) { mask[q + 1] = 2; stack[sp++] = q + 1; }
+      if (qy > 0 && mask[q - w] === 1) { mask[q - w] = 2; stack[sp++] = q - w; }
+      if (qy < h - 1 && mask[q + w] === 1) { mask[q + w] = 2; stack[sp++] = q + w; }
     }
-    blobs.sort((a, b) => b.area - a.area);
-    return blobs.slice(0, 40);
+    const bw = x1 - x0 + 1, bh = y1 - y0 + 1;
+    return { x: sx / area + 0.5, y: sy / area + 0.5, area, fill: area / (bw * bh), aspect: Math.max(bw, bh) / Math.min(bw, bh) };
+  }
+  function findBlobs(data, w, h, model, opts) {
+    opts = opts || {};
+    const n = w * h;
+    if (!_mask || _mask.length !== n) { _mask = new Uint8Array(n); _tmp = new Uint8Array(n); _stack = new Int32Array(n); _pix = new Int32Array(n * 2); _d = new Float32Array(n); }
+    const mask = _mask, tmp = _tmp, dm = _d;
+    const t = model.tol || 1, th = 9 * t * t, iMin = model.iMin, mx = model.mx, my = model.my, a = model.ixx, b2 = 2 * model.ixy, c = model.iyy;
+    for (let i = 0, p = 0; p < n; p++, i += 4) {
+      const r = data[i], g = data[i + 1], bl = data[i + 2], s = r + g + bl + 1;
+      if (s < iMin) { tmp[p] = 0; dm[p] = 1e9; continue; }
+      const dx = (r - g) / s - mx, dy = (r + g - 2 * bl) / s - my, d2 = a * dx * dx + b2 * dx * dy + c * dy * dy;
+      dm[p] = d2; tmp[p] = d2 <= th ? 1 : 0;
+    }
+    // close 1-pixel gaps (highlights, blur) with a 3x3 dilation
+    for (let y = 0; y < h; y++) { const o = y * w; for (let x = 0; x < w; x++) { const p = o + x; mask[p] = tmp[p] | (x > 0 ? tmp[p - 1] : 0) | (x < w - 1 ? tmp[p + 1] : 0); } }
+    for (let p = 0; p < n; p++) tmp[p] = mask[p];
+    for (let y = 0; y < h; y++) { const o = y * w; for (let x = 0; x < w; x++) { const p = o + x; mask[p] = tmp[p] | (y > 0 ? tmp[p - w] : 0) | (y < h - 1 ? tmp[p + w] : 0); } }
+    const ref = model.area || 30;
+    const minArea = Math.max(6, ref * 0.2), maxArea = Math.min(n / 150, Math.max(ref * 10, 400));
+    const good = b => b.area >= minArea && b.area <= maxArea && b.fill >= 0.4 && b.aspect <= 3;
+    const blobs = [], rejected = opts.rejected;
+    tmp.fill(0);
+    for (let p = 0; p < n; p++) {
+      if (mask[p] !== 1) continue;
+      const blob = fill(mask, w, h, p, 0);
+      if (blob.area < 6) continue; // single noisy pixels: not worth drawing
+      if (good(blob)) { blobs.push(blob); continue; }
+      // Too big or badly shaped: often a sticker touching fabric of a similar colour.
+      // Look again inside it, keeping only the pixels closest to the sticker colour.
+      let found = false;
+      if (blob.area >= minArea && blob.area <= ref * 25) {
+        const core = th * 0.3, list = _pix.subarray(0, blob.area);
+        for (let k = 0; k < list.length; k++) { const q = list[k]; if (dm[q] <= core) tmp[q] = 1; }
+        for (let k = 0; k < list.length; k++) {
+          const q = list[k]; if (tmp[q] !== 1) continue;
+          const sub = fill(tmp, w, h, q, n);
+          if (sub.area >= Math.max(5, ref * 0.15) && sub.area <= maxArea && sub.fill >= 0.45 && sub.aspect <= 2.5) { blobs.push(sub); found = true; }
+        }
+        for (let k = 0; k < list.length; k++) tmp[list[k]] = 0;
+      }
+      if (!found && rejected && rejected.length < 60) rejected.push(blob);
+    }
+    blobs.sort((p, q) => q.area - p.area);
+    return blobs.slice(0, 40).map(b => ({ x: b.x, y: b.y, area: b.area }));
+  }
+  function lastMask() { return _mask; }
+
+  // Try a range of tolerances on one frame and keep the middle of the widest range that finds an
+  // expected number of stickers (4, 5 or 7 from the side). Returns null when none does.
+  const TOLS = [0.35, 0.45, 0.6, 0.8, 1, 1.3, 1.7, 2.2, 3];
+  function autoTolerance(data, w, h, model, counts) {
+    const ns = TOLS.map(t => findBlobs(data, w, h, Object.assign({}, model, { tol: t })).length);
+    let best = null;
+    for (let i = 0; i < TOLS.length; i++) {
+      if (!counts.includes(ns[i])) continue;
+      let j = i; while (j + 1 < TOLS.length && ns[j + 1] === ns[i]) j++;
+      if (!best || j - i > best[1] - best[0] || (j - i === best[1] - best[0] && ns[i] > ns[best[0]])) best = [i, j];
+      i = j;
+    }
+    return { tol: best ? TOLS[Math.floor((best[0] + best[1]) / 2)] : null, n: best ? ns[best[0]] : null, counts: ns };
   }
 
   // ---------- tracking ----------
@@ -593,7 +676,7 @@ const BF = (function () {
     return { next, later: cands.concat(later) };
   }
 
-  return { rgbToHsv, sampleColor, makeMatcher, findBlobs, hungarian, snap, angleAt, median, cleanSeries, findPeaks, estimatePeriod, resample,
+  return { TOLS, rgbToHsv, learnColor, findBlobs, lastMask, autoTolerance, hungarian, snap, angleAt, median, cleanSeries, findPeaks, estimatePeriod, resample,
     createAnonTracker, createSession, stableTracks, autoLabelSide, autoLabelFront, learnSkeleton, skeletonError, findSwap, segmentStability, slippingSticker,
     footScale, analyzeSide, analyzeFront, recommend, status, targetFor, isMm,
     TARGETS, FRONT_TARGETS, SIDE_LABELS, FRONT_LABELS, SIDE_KEYS, FRONT_KEYS, SEGS };

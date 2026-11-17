@@ -9,7 +9,8 @@ time.sleep(1)
 try:
     with sync_playwright() as pw:
         b = pw.chromium.launch(executable_path='/usr/bin/google-chrome', args=['--use-fake-device-for-media-stream', '--use-fake-ui-for-media-stream', f'--use-file-for-fake-video-capture={y4m}', '--autoplay-policy=no-user-gesture-required'])
-        ctx = b.new_context(viewport={'width': 844, 'height': 390}, device_scale_factor=2, locale='fr-FR')
+        portrait = len(sys.argv) > 3 and sys.argv[3] == 'portrait'
+        ctx = b.new_context(viewport={'width': 390, 'height': 844} if portrait else {'width': 844, 'height': 390}, device_scale_factor=2, locale='fr-FR')
         pg = ctx.new_page(); errs = []
         pg.on('console', lambda m: errs.append(m.text) if m.type == 'error' and 'ERR_' not in m.text else None)
         pg.on('pageerror', lambda e: errs.append(str(e)))
@@ -20,7 +21,8 @@ try:
         pg.click('[data-act=live][data-v=side]'); pg.wait_for_timeout(2500)
         print('status 1:', pg.locator('.hud-status').inner_text())
         bb = pg.locator('#view').bounding_box()
-        pg.mouse.click(bb['x'] + 260 / 640 * bb['width'], bb['y'] + 148 / 360 * bb['height'])   # the hip sticker
+        print('toolbar visible:', pg.locator('#tools').is_visible(), '| tools bottom', round(pg.locator('#tools').bounding_box()['y'] + pg.locator('#tools').bounding_box()['height']), 'of', pg.viewport_size['height'])
+        pg.mouse.click(bb['x'] + 367 / 640 * bb['width'], bb['y'] + 88 / 360 * bb['height'])   # the shoulder sticker
         pg.wait_for_timeout(1500); print('status 2:', pg.locator('.hud-status').inner_text().replace('\n', ' | '))
         pg.screenshot(path=f'{out}/3_search.png')
         pg.wait_for_selector('.hud-status.good', timeout=40000); pg.wait_for_timeout(1200)

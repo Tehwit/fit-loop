@@ -65,7 +65,7 @@ const I18N = {
     later_knee_travel: 'Le genou {side} se déplace de {v} mm sur le côté. Vérifie la rotation des cales, l\'écartement des pieds, les semelles ou des cales d\'inclinaison, une fois la hauteur de selle réglée.',
     later_knee_offset: 'Le genou {side} passe {v} mm à l\'{where} du pied. Regarde la position latérale de la cale ou une entretoise de pédale.',
     left: 'gauche', right: 'droit', inside: 'intérieur', outside: 'extérieur',
-    live_nocolor: 'Touche un sticker dans l\'image pour apprendre sa couleur', live_pick: 'Touche un sticker dans l\'image',
+    live_nocolor: 'Touche le centre d\'un sticker dans l\'image pour apprendre sa couleur', live_pick: 'Touche un sticker dans l\'image',
     live_count: 'Je vois {n} sticker(s). Il en faut {need}.', need_side: '4, 5 ou 7', need_front: '4',
     live_still: 'Stickers trouvés. Pédale pour que je les reconnaisse.', live_unsure: 'Reconnaissance en cours, continue de pédaler…', live_lost: 'Stickers perdus, je cherche à nouveau…',
     live_paused: 'En pause. Pédale pour mesurer.', live_measuring: 'Mesure en cours… {c}/{need} coups de pédale', live_stable: 'Mesure stable', live_saved: 'Relevé enregistré',
@@ -79,6 +79,9 @@ const I18N = {
     cam_none: 'Aucune caméra disponible sur cet appareil.', cam_insecure: 'La caméra exige une adresse en https.', video_bad: 'Cette vidéo ne peut pas être lue par le navigateur.',
     v_ready: 'Stickers reconnus.', v_lost: 'Stickers perdus.', v_saved: 'Relevé enregistré.', v_knee: 'Extension du genou {v} degrés.', v_next: 'Prochain réglage : {what}.', v_none: 'Aucun réglage nécessaire.', v_mm: 'millimètres',
     check: 'Relevé', strokes: 'coups de pédale',
+    live_tap_hint: 'Touche un sticker dans l\'image pour réapprendre la couleur. « Vue » montre en violet ce qui correspond à la couleur.',
+    tol_set: '{n} stickers trouvés.', v_count: 'Je vois {n} stickers.', b_view: 'Vue', b_snap: 'Photo', b_tolauto_on: 'Tol. auto', b_tolauto_off: 'Tol. manuelle',
+    snap_saved: 'Image enregistrée dans tes téléchargements. Envoie-la à Claude pour analyse.', cam_switched: 'Caméra {i}/{n}',
   },
   en: {
     tagline: 'Bike fitting, one change at a time',
@@ -159,6 +162,9 @@ const I18N = {
     cam_none: 'No camera available on this device.', cam_insecure: 'The camera needs an https address.', video_bad: 'This video cannot be played by the browser.',
     v_ready: 'Stickers recognised.', v_lost: 'Stickers lost.', v_saved: 'Check saved.', v_knee: 'Knee extension {v} degrees.', v_next: 'Next change: {what}.', v_none: 'No change needed.', v_mm: 'millimetres',
     check: 'Check', strokes: 'pedal strokes',
+    live_tap_hint: 'Tap a sticker in the picture to relearn its colour. "View" shows in purple what matches the colour.',
+    tol_set: '{n} stickers found.', v_count: 'I see {n} stickers.', b_view: 'View', b_snap: 'Photo', b_tolauto_on: 'Tol. auto', b_tolauto_off: 'Tol. manual',
+    snap_saved: 'Image saved to your downloads. Send it to Claude for analysis.', cam_switched: 'Camera {i}/{n}',
   },
 };
 if (typeof module !== 'undefined') module.exports = I18N;

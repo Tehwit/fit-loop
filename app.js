@@ -216,8 +216,9 @@ const MIN_CYCLES = 6;
 async function startLive(view, file) {
   const r = DB.rider(S.riderId); if (!r) return;
   stopLive(true);
-  const col = DB.data.color;
-  Object.assign(L, { on: true, view, rider: r, targets: targetsFor(r), ses: null, W: 0, spec: col ? col.spec : null, tol: col ? col.tol : 1, pick: null, pickMode: !col,
+  const col = DB.data.colorModel;
+  Object.assign(L, { on: true, view, rider: r, targets: targetsFor(r), ses: null, W: 0, model: col || null, tol: col ? col.tol : 1, autoTol: col ? col.autoTol !== false : true, pick: null, pickMode: false,
+    rejected: [], lastTune: 0, debug: false, snap: false, countSeen: null, countSince: 0,
     frames: [], recent: [], out: { state: 'nocolor' }, blobs: [], result: null, rec: null, lastHud: 0, idleSince: null, paused: false, savedBout: false, savedAt: 0,
     wasTrack: false, lastVideoTime: -1, tilt: null, stream: null, file: !!file, prev: lastCheck(r.id, view), fps: 0, fpsN: 0, fpsT: 0 });
   $('#live').hidden = false; document.body.style.overflow = 'hidden';
@@ -228,7 +229,15 @@ async function startLive(view, file) {
     if (file) { vid.srcObject = null; vid.src = URL.createObjectURL(file); }
     else {
       if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) throw Object.assign(new Error('insecure'), { name: window.isSecureContext ? 'NotFoundError' : 'InsecureError' });
-      L.stream = await navigator.mediaDevices.getUserMedia({ audio: false, video: { facingMode: { ideal: DB.data.settings.facing }, width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 30 } } });
+      const base = { width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 30 } }, dev = DB.data.settings.deviceId;
+      try { L.stream = await navigator.mediaDevices.getUserMedia({ audio: false, video: Object.assign({}, base, dev ? { deviceId: { exact: dev } } : { facingMode: { ideal: DB.data.settings.facing } }) }); }
+      catch (e) {
+        if (!dev || e.name === 'NotAllowedError') throw e;
+        delete DB.data.settings.deviceId; DB.save(); // that camera is gone: fall back to front/back
+        L.stream = await navigator.mediaDevices.getUserMedia({ audio: false, video: Object.assign({}, base, { facingMode: { ideal: DB.data.settings.facing } }) });
+      }
+      // widest view the camera allows (some phones expose the 0.5x lens as a zoom below 1)
+      try { const tr = L.stream.getVideoTracks()[0], cap = tr.getCapabilities ? tr.getCapabilities() : {}; if (cap.zoom && cap.zoom.min < 1) await tr.applyConstraints({ advanced: [{ zoom: cap.zoom.min }] }); } catch (e) { /* no zoom control */ }
       vid.removeAttribute('src'); vid.srcObject = L.stream;
     }
     await vid.play();
@@ -276,18 +285,26 @@ function watchTilt() {
   } catch (e) { /* no motion sensor */ }
 }
 
+const counts = () => (L.view === 'side' ? [4, 5, 7] : [4]);
 function learnColor(img, W, H, x, y) {
-  const d = img.data; let bx = Math.round(x), by = Math.round(y), best = -1;
-  const rad = Math.round(W / 70);
-  for (let yy = Math.max(0, by - rad); yy <= Math.min(H - 1, by + rad); yy++) for (let xx = Math.max(0, bx - rad); xx <= Math.min(W - 1, bx + rad); xx++) {
-    const i = (yy * W + xx) * 4, c = BF.rgbToHsv(d[i], d[i + 1], d[i + 2]), sc = c.s * c.v;
-    if (sc > best) { best = sc; bx = xx; by = yy; }
-  }
-  const spec = BF.sampleColor(d, W, H, bx, by, 1);
-  if (spec.s < 0.25) { toast(T('color_dull')); return; }
-  L.spec = spec; L.pickMode = false; DB.data.color = { spec, tol: L.tol }; DB.save();
+  const m = BF.learnColor(img.data, W, H, x, y);
+  if (!m) { toast(T('color_dull')); return; }
+  L.model = m; L.pickMode = false; L.autoTol = true;
+  const at = BF.autoTolerance(img.data, W, H, m, counts());
+  L.tol = at.tol || 1;
+  saveModel();
   if (L.ses) L.ses.reset(); L.frames = []; L.result = null;
-  toast(T('color_learned')); renderTools();
+  toast(T('color_learned') + (at.tol ? ' ' + T('tol_set', { n: at.n }) : '')); renderTools();
+}
+function saveModel() { DB.data.colorModel = Object.assign({}, L.model, { tol: L.tol, autoTol: L.autoTol }); DB.save(); }
+function snapshot(img, W, H) {
+  const c = document.createElement('canvas'); c.width = W; c.height = H; c.getContext('2d').putImageData(img, 0, 0);
+  c.toBlob(b => {
+    if (!b) return;
+    const a = document.createElement('a'); a.href = URL.createObjectURL(b); a.download = 'fit-loop-camera-' + new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-') + '.png';
+    document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+    toast(T('snap_saved'));
+  }, 'image/png');
 }
 
 function frame() {
@@ -298,9 +315,22 @@ function frame() {
   if (W !== L.W || H !== L.H) { L.W = W; L.H = H; work.width = viewC.width = W; work.height = viewC.height = H; L.ses = BF.createSession(L.view, W); L.frames = []; }
   wctx.drawImage(vid, 0, 0, W, H);
   const img = wctx.getImageData(0, 0, W, H);
+  if (L.snap) { L.snap = false; snapshot(img, W, H); }
   if (L.pick) { learnColor(img, W, H, L.pick[0] * W, L.pick[1] * H); L.pick = null; }
-  L.blobs = L.spec ? BF.findBlobs(img.data, W, H, Object.assign({}, L.spec, { tol: L.tol }), { minArea: Math.max(5, Math.round(W * W / 90000)), maxArea: W * H / 120 }) : [];
-  const out = L.spec ? L.ses.step(L.blobs, t) : { state: 'nocolor' };
+  L.rejected = [];
+  L.blobs = L.model ? BF.findBlobs(img.data, W, H, Object.assign({}, L.model, { tol: L.tol }), { rejected: L.rejected }) : [];
+  // wrong number of stickers for a while: try other tolerances on this frame
+  if (L.model && L.autoTol && L.out.state === 'search' && L.out.reason === 'count' && t - L.lastTune > 2) {
+    L.lastTune = t;
+    const at = BF.autoTolerance(img.data, W, H, L.model, counts());
+    if (at.tol && at.tol !== L.tol) { L.tol = at.tol; saveModel(); L.blobs = BF.findBlobs(img.data, W, H, Object.assign({}, L.model, { tol: L.tol }), { rejected: (L.rejected = []) }); }
+  }
+  if (L.debug && L.model) { // paint what matches the sticker colour
+    const mk = BF.lastMask(), d = img.data;
+    for (let p = 0; p < mk.length; p++) if (mk[p]) { d[p * 4] = 255; d[p * 4 + 1] = 0; d[p * 4 + 2] = 255; }
+    wctx.putImageData(img, 0, 0);
+  }
+  const out = L.model ? L.ses.step(L.blobs, t) : { state: 'nocolor' };
   L.out = out;
   const isTrack = out.state === 'track';
   if (isTrack && !L.wasTrack) say(T('v_ready'));
@@ -367,6 +397,10 @@ function draw(out) {
   if (out.state !== 'track') {
     vctx.lineWidth = 2 * K;
     L.blobs.forEach(b => { vctx.strokeStyle = '#000'; vctx.beginPath(); vctx.arc(b.x, b.y, 11 * K, 0, 7); vctx.stroke(); vctx.strokeStyle = '#fff'; vctx.beginPath(); vctx.arc(b.x, b.y, 9 * K, 0, 7); vctx.stroke(); });
+    if (L.debug) { // rejected: right colour, wrong size or shape
+      vctx.strokeStyle = '#ff3b3b'; vctx.lineWidth = 2 * K;
+      L.rejected.forEach(b => { const r = 6 * K; vctx.beginPath(); vctx.moveTo(b.x - r, b.y - r); vctx.lineTo(b.x + r, b.y + r); vctx.moveTo(b.x + r, b.y - r); vctx.lineTo(b.x - r, b.y + r); vctx.stroke(); });
+    }
     return;
   }
   const P = out.pts, segs = L.view === 'side' ? [['wrist', 'elbow'], ['elbow', 'shoulder'], ['shoulder', 'hip'], ['hip', 'knee'], ['knee', 'ankle'], ['ankle', 'foot']] : [['kneeL', 'footL'], ['kneeR', 'footR']];
@@ -396,11 +430,15 @@ function renderHud(t) {
   const out = L.out, warn = [];
   let status = '', good = false, sub = '', body = '';
   if (L.tilt != null && L.tilt > 2) warn.push(T('warn_tilt', { deg: Math.round(L.tilt) }));
-  if (out.state === 'nocolor' || L.pickMode) status = T(L.spec ? 'live_pick' : 'live_nocolor');
+  if (out.state === 'nocolor' || L.pickMode) status = T(L.model ? 'live_pick' : 'live_nocolor');
   else if (out.state === 'search') {
-    status = out.reason === 'still' ? T('live_still') : out.reason === 'unsure' ? T('live_unsure') : out.reason === 'lost' ? T('live_lost') : T('live_count', { n: out.n || 0, need: T('need_' + L.view) });
-    if (out.reason === 'count' && (out.n || 0) > 7) warn.push(T('warn_many', { n: out.n }));
-    if (out.reason === 'count' && out.n > 0 && t - (L.lastCountSay || 0) > 15) { L.lastCountSay = t; say(status); }
+    const n = L.blobs.length;
+    status = out.reason === 'still' || (out.reason === 'count' && counts().includes(n)) ? T('live_still') : out.reason === 'unsure' ? T('live_unsure') : out.reason === 'lost' ? T('live_lost') : T('live_count', { n, need: T('need_' + L.view) });
+    body = `<div class="bigcount${counts().includes(n) ? ' good' : ''}">${n}<small> / ${esc(T('need_' + L.view))}</small></div><p class="muted small">${esc(T('live_tap_hint'))}</p>`;
+    if (n > 7) warn.push(T('warn_many', { n }));
+    // say the count aloud when it settles on a new value, so the rider hears it from the bike
+    if (n !== L.countSeen) { L.countSeen = n; L.countSince = t; L.countSaid = false; }
+    else if (!L.countSaid && t - L.countSince > 1.5 && out.reason === 'count' && !counts().includes(n)) { L.countSaid = true; say(T('v_count', { n }), true); }
   } else {
     const res = L.result;
     if (out.missing.length) warn.push(T('warn_missing', { list: out.missing.map(l => T('l_' + l)).join(', ') }));
@@ -426,15 +464,32 @@ function renderTools() {
   $('#tools').innerHTML = `<button class="btn primary" id="bSave" data-act="saveNow" disabled>${esc(T('b_save'))}</button>
     <button class="btn${L.pickMode ? ' on' : ''}" data-act="pick">${esc(T('b_color'))}</button>
     <button class="btn" data-act="tolDown" aria-label="${esc(T('b_tol_long'))} −">${esc(T('b_tol'))} −</button><button class="btn" data-act="tolUp" aria-label="${esc(T('b_tol_long'))} +">${esc(T('b_tol'))} +</button>
+    <button class="btn${L.autoTol ? ' on' : ''}" data-act="autoTol">${esc(T(L.autoTol ? 'b_tolauto_on' : 'b_tolauto_off'))}</button>
+    <button class="btn${L.debug ? ' on' : ''}" data-act="debug">${esc(T('b_view'))}</button>
+    <button class="btn" data-act="snap">${esc(T('b_snap'))}</button>
     ${L.file ? '' : `<button class="btn" data-act="flip">${esc(T('b_camera'))}</button>`}
     <button class="btn" data-act="voice">${esc(T(s.voice ? 'b_voice_on' : 'b_voice_off'))}</button>
     <button class="btn" data-act="auto">${esc(T(s.autosave ? 'b_auto_on' : 'b_auto_off'))}</button>
     <button class="btn" data-act="quit">${esc(T('b_quit'))}</button>`;
 }
 viewC.addEventListener('click', e => {
-  if (!L.on || !(L.pickMode || !L.spec)) return;
+  if (!L.on || !(L.pickMode || !L.model || L.out.state !== 'track')) return; // a tap while searching relearns the colour
   const r = viewC.getBoundingClientRect(); L.pick = [(e.clientX - r.left) / r.width, (e.clientY - r.top) / r.height];
 });
+
+// Cycle through every camera the phone exposes (front, main, wide…), not just front/back.
+async function cycleCamera() {
+  const s = DB.data.settings;
+  let cams = [];
+  try { cams = (await navigator.mediaDevices.enumerateDevices()).filter(d => d.kind === 'videoinput'); } catch (e) { /* no list */ }
+  const cur = L.stream && L.stream.getVideoTracks()[0] ? L.stream.getVideoTracks()[0].getSettings().deviceId : null;
+  if (cams.length > 1) {
+    const i = cams.findIndex(c => c.deviceId === cur), next = cams[(i + 1) % cams.length];
+    s.deviceId = next.deviceId; DB.save();
+    await startLive(L.view);
+    toast(T('cam_switched', { i: (i + 1) % cams.length + 1, n: cams.length }) + (next.label ? ' · ' + next.label : ''));
+  } else { delete s.deviceId; s.facing = s.facing === 'environment' ? 'user' : 'environment'; DB.save(); startLive(L.view); }
+}
 
 // ---------------- export / import ----------------
 function exportData() {
@@ -476,8 +531,14 @@ function act(a, b) {
     case 'quit': return stopLive();
     case 'saveNow': return saveCheck(false);
     case 'pick': L.pickMode = !L.pickMode; return renderTools();
-    case 'tolUp': case 'tolDown': L.tol = Math.max(0.4, Math.min(2.2, Math.round((L.tol + (a === 'tolUp' ? 0.1 : -0.1)) * 10) / 10)); if (DB.data.color) { DB.data.color.tol = L.tol; DB.save(); } return toast(T('b_tol_long') + ' ' + num(L.tol, 1));
-    case 'flip': s.facing = s.facing === 'environment' ? 'user' : 'environment'; DB.save(); return startLive(L.view);
+    case 'tolUp': case 'tolDown': {
+      const i = BF.TOLS.findIndex(v => v >= L.tol - 1e-6), j = Math.max(0, Math.min(BF.TOLS.length - 1, (i < 0 ? BF.TOLS.length - 1 : i) + (a === 'tolUp' ? 1 : -1)));
+      L.tol = BF.TOLS[j]; L.autoTol = false; if (L.model) saveModel(); renderTools(); return toast(T('b_tol_long') + ' ' + num(L.tol, 2));
+    }
+    case 'autoTol': L.autoTol = !L.autoTol; L.lastTune = 0; if (L.model) saveModel(); return renderTools();
+    case 'debug': L.debug = !L.debug; return renderTools();
+    case 'snap': L.snap = true; return;
+    case 'flip': return cycleCamera();
     case 'voice': s.voice = !s.voice; DB.save(); if (!s.voice && 'speechSynthesis' in window) speechSynthesis.cancel(); return renderTools();
     case 'auto': s.autosave = !s.autosave; DB.save(); return renderTools();
     case 'saveRider': {

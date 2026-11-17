@@ -29,20 +29,48 @@ function frontPose(t, cad) {
     kneeL: [cx + 40 + 3 * Math.sin(th + Math.PI), 180 + 34 * Math.cos(th)], footL: [cx + 50, 290 + 40 * Math.cos(th)],
   };
 }
-function render(p, seed, only) {
+// opts.hard: a realistic room for a blue sticker: bluish-grey wall with uneven light, navy bib shorts,
+// a large blue bottle, blue jeans on a chair, camera noise, blurred sticker edges and shaded stickers.
+function render(p, seed, only, opts) {
+  opts = opts || {};
   const d = new Uint8ClampedArray(W * H * 4);
   let s = seed;
   const rnd = () => ((s = (s * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff);
-  for (let i = 0; i < W * H; i++) { const g = 150 + rnd() * 40; d[i * 4] = g; d[i * 4 + 1] = g - 5; d[i * 4 + 2] = g + 5; d[i * 4 + 3] = 255; }
-  const disc = (x, y, r, c) => {
-    for (let yy = Math.floor(y - r); yy <= y + r; yy++) for (let xx = Math.floor(x - r); xx <= x + r; xx++) {
-      if (xx < 0 || yy < 0 || xx >= W || yy >= H || Math.hypot(xx + 0.5 - x, yy + 0.5 - y) > r) continue;
-      const i = (yy * W + xx) * 4; d[i] = c[0] + rnd() * 10; d[i + 1] = c[1] + rnd() * 10; d[i + 2] = c[2] + rnd() * 10;
+  const col = opts.color || [40, 230, 60];
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+    const i = (y * W + x) * 4;
+    if (opts.hard) { const k = 0.55 + 0.6 * x / W, n = (rnd() - 0.5) * 24; d[i] = 150 * k + n; d[i + 1] = 158 * k + n; d[i + 2] = 178 * k + n; }
+    else { const g = 150 + rnd() * 40; d[i] = g; d[i + 1] = g - 5; d[i + 2] = g + 5; }
+    d[i + 3] = 255;
+  }
+  // anti-aliased disc; shade < 1 darkens the rim (round sticker on a curved leg)
+  const disc = (x, y, r, c, shade) => {
+    for (let yy = Math.floor(y - r - 1); yy <= y + r + 1; yy++) for (let xx = Math.floor(x - r - 1); xx <= x + r + 1; xx++) {
+      if (xx < 0 || yy < 0 || xx >= W || yy >= H) continue;
+      const dist = Math.hypot(xx + 0.5 - x, yy + 0.5 - y), al = Math.max(0, Math.min(1, r + 0.5 - dist));
+      if (!al) continue;
+      const k = shade ? 1 - (1 - shade) * Math.min(1, dist / r) : 1, i = (yy * W + xx) * 4, n = opts.hard ? (rnd() - 0.5) * 36 : rnd() * 10;
+      for (let ch = 0; ch < 3; ch++) d[i + ch] = d[i + ch] * (1 - al) + (c[ch] * k + n) * al;
     }
   };
-  if (p.hip) { disc(p.hip[0], p.hip[1], 18, [30, 30, 35]); disc(p.knee[0], p.knee[1], 12, [30, 30, 35]); }
-  disc(80, 80, 13, [240, 120, 20]); disc(560, 50, 18, [90, 130, 90]); // distractors: orange bottle, dull green poster
-  Object.keys(p).forEach(k => { if (!only || only.includes(k)) disc(p[k][0], p[k][1], 5, [40, 230, 60]); });
+  const rect = (x0, y0, x1, y1, c) => { for (let y = y0; y < y1; y++) for (let x = x0; x < x1; x++) { const i = (y * W + x) * 4, n = (rnd() - 0.5) * 16; d[i] = c[0] + n; d[i + 1] = c[1] + n; d[i + 2] = c[2] + n; } };
+  if (opts.hard) {
+    rect(40, 230, 150, 345, [62, 82, 128]);      // jeans on a chair
+    if (p.hip) { disc(p.hip[0], p.hip[1], 30, [28, 32, 58]); disc(p.knee[0], p.knee[1], 15, [28, 32, 58]); } // navy bib shorts
+    disc(570, 300, 24, [25, 95, 235]);           // big blue bottle
+    rect(0, 0, W, 12, [70, 90, 140]);            // dark blue picture frame edge
+  } else {
+    if (p.hip) { disc(p.hip[0], p.hip[1], 18, [30, 30, 35]); disc(p.knee[0], p.knee[1], 12, [30, 30, 35]); }
+    disc(80, 80, 13, [240, 120, 20]); disc(560, 50, 18, [90, 130, 90]); // distractors: orange bottle, dull green poster
+  }
+  // hard: each joint faces the light differently (brightness 45–110 %) and some stickers have a glare spot
+  const LIGHT = { shoulder: 1.1, elbow: 0.8, wrist: 0.6, hip: 0.95, knee: 0.7, ankle: 0.5, foot: 0.45, kneeL: 0.9, kneeR: 0.6, footL: 0.5, footR: 0.75 };
+  Object.keys(p).forEach(k => {
+    if (only && !only.includes(k)) return;
+    const L = opts.hard ? LIGHT[k] || 1 : 1, c = col.map(v => Math.min(255, v * L));
+    disc(p[k][0], p[k][1], opts.r || 5, c, opts.hard ? 0.55 : null);
+    if (opts.hard && (k === 'knee' || k === 'hip' || k === 'kneeL')) disc(p[k][0] - 1.5, p[k][1] - 1.5, 1.3, [235, 238, 245]);
+  });
   return d;
 }
 module.exports = { W, H, sidePose, frontPose, render };
