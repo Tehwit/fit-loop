@@ -108,7 +108,7 @@ function renderProcess() {
 async function run() {
   V.phase = 'process'; V.cancel = false; render();
   const init = {}; Object.keys(V.init).forEach(l => { if (V.init[l]) init[l] = V.init[l]; });
-  const tracker = BF.createLocalTracker(V.model, init, V.W, V.H), frames = [];
+  const tracker = BF.createLocalTracker(V.model, init, V.W, V.H, { data0: V.frame.data }), frames = [];
   const end = Math.min(V.duration - 0.05, V.t0 + 40), live = $('#vLive').getContext('2d');
   let lastDraw = 0;
   const handle = t => {
@@ -143,6 +143,9 @@ async function run() {
 
 function analyse(frames) {
   const labels = V.view === 'side' ? BF.SIDE_LABELS : BF.FRONT_LABELS, uni = BF.resample(frames, labels, 30);
+  // share of frames where each sticker was actually seen, before any rebuilding
+  V.seen = {}; labels.forEach(l => { V.seen[l] = uni.filter(f => f.pts[l]).length / Math.max(1, uni.length); });
+  V.rebuilt = V.view === 'side' ? BF.fillKnee(uni) / Math.max(1, uni.length) : 0;
   const r = FL.rider(), opts = { fps: 30, crankMm: r.crankMm || 172.5, minCycles: 4 };
   const res = V.view === 'side' ? BF.analyzeSide(uni, opts) : BF.analyzeFront(uni, opts);
   V.frames = uni; V.result = res; V.phase = 'result';
@@ -161,16 +164,18 @@ function renderResult() {
   const warn = [];
   if (res.cycles < 2) warn.push(T('vid_few'));
   if (res.slip) warn.push(T('warn_slip', { label: T('l_' + res.slip) }));
-  if (res.pathRatio && res.pathRatio < 0.93) warn.push(T('warn_yaw', { deg: Math.round(Math.acos(Math.min(1, res.pathRatio)) * 180 / Math.PI) }));
   // Leg stickers must be followed on most frames, or the angles come from too few points to be trusted.
   const legs = V.view === 'side' ? ['hip', 'knee', 'ankle', 'foot'] : ['kneeL', 'kneeR', 'footL', 'footR'];
-  const cov = labels.map(l => [l, res.coverage ? res.coverage[l] || 0 : 0]);
-  const weak = cov.filter(([l, c]) => legs.includes(l) && c < 0.8);
+  const cov = labels.map(l => [l, V.seen[l] || 0]);
+  // 70% for each leg sticker; the knee may be lower when it could be rebuilt from hip and ankle
+  const kneeOk = l => l === 'knee' && V.seen.knee >= 0.15 && (V.seen.knee + V.rebuilt) >= 0.7;
+  const weak = cov.filter(([l, c]) => legs.includes(l) && c < 0.7 && !kneeOk(l));
   const ok = res.cycles >= 2 && !weak.length;
   app.innerHTML = `
     <section class="stack"><span class="eyebrow">${esc(r.name)} · ${esc(T(V.view))}${res.cadence ? ' · ' + Math.round(res.cadence) + ' ' + esc(T('rpm')) : ''} · ${res.cycles} ${esc(T('strokes'))}</span>
       <h1>${esc(T(ok ? 'vid_done' : weak.length ? 'vid_unreliable' : 'vid_failed'))}</h1></section>
-    <section class="sheet"><h3>${esc(T('vid_coverage'))}</h3><div class="chips">${cov.map(([l, c]) => `<span class="chip ${c >= 0.9 ? 'ok' : c >= 0.8 ? 'near' : 'out'}">${esc(T('l_' + l))} ${Math.round(c * 100)} %</span>`).join('')}</div>
+    <section class="sheet"><h3>${esc(T('vid_coverage'))}</h3><div class="chips">${cov.map(([l, c]) => `<span class="chip ${c >= 0.85 ? 'ok' : c >= 0.7 || kneeOk(l) ? 'near' : 'out'}">${esc(T('l_' + l))} ${Math.round(c * 100)} %</span>`).join('')}</div>
+      ${V.rebuilt > 0.02 && !weak.length ? `<p class="small muted">${esc(T('vid_rebuilt', { pct: Math.round(V.rebuilt * 100) }))}</p>` : ''}
       ${weak.length ? `<p class="small">${esc(T('vid_unreliable_p'))}</p>` : ''}</section>
     <div class="frame"><canvas id="vRes" width="${V.W}" height="${V.H}" style="width:100%;height:auto;display:block"></canvas></div>
     <label class="field"><span>${esc(T('vid_review'))}</span><input type="range" id="vScrub" min="0" max="${V.frames.length - 1}" step="1" value="${V.show}"></label>
@@ -189,6 +194,7 @@ async function showFrame(i) {
   const ctx = c.getContext('2d'), K = Math.max(1, c.width / (c.getBoundingClientRect().width || c.width));
   ctx.drawImage(vid, 0, 0, V.W, V.H);
   FL.drawPose(ctx, f.pts, V.view, K, false, true);
+  if (f.inferred && f.inferred.knee && f.pts.knee) { ctx.strokeStyle = '#ffd43b'; ctx.lineWidth = 2 * K; ctx.setLineDash([4 * K, 3 * K]); ctx.beginPath(); ctx.arc(f.pts.knee[0], f.pts.knee[1], 9 * K, 0, 7); ctx.stroke(); ctx.setLineDash([]); }
 }
 
 function save() {

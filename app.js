@@ -492,7 +492,6 @@ function renderHud(t) {
       if (t - L.savedAt < 6) good = true;
       sub = `${res.cadence ? Math.round(res.cadence) + ' ' + T('rpm') + ' · ' : ''}${res.cycles} ${T('strokes')}`;
       if (res.slip) warn.push(T('warn_slip', { label: T('l_' + res.slip) }));
-      if (res.pathRatio && res.pathRatio < 0.93) warn.push(T('warn_yaw', { deg: Math.round(Math.acos(Math.min(1, res.pathRatio)) * 180 / Math.PI) }));
       const prev = L.prev && t - L.savedAt < 6 ? lastCheck(L.rider.id, L.view, L.prev.created, L.prev.id) : L.prev;
       if (L.rec) body += `<div class="hud-next"><span class="eyebrow">${esc(T('next'))}</span><b>${esc(L.rec.next ? recText(L.rec.next).title : T('no_change'))}</b></div>`;
       body += `<div class="tiles">${keysFor(L.view).filter(k => Number.isFinite(res.metrics[k])).map(k => tile(k, res.metrics[k], prev)).join('')}</div>`;

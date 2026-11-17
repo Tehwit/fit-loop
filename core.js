@@ -357,8 +357,18 @@ const BF = (function () {
   // init: {label: [x, y]} named on one frame. step(data, t) -> {label: [x, y] | null}
   function createLocalTracker(model, init, w, h, opts) {
     opts = opts || {};
-    const score = makeScorer(Object.assign({}, model, { tol: opts.tol || 1.7 }));
-    const labels = Object.keys(init), ref = model.area || 30, base = Math.max(10, w * 0.035);
+    const tol = opts.tol || 1.7, labels = Object.keys(init), ref = model.area || 30, base = Math.max(10, w * 0.035);
+    // Each sticker gets its own colour strength, learned where it was tapped: a sticker on pale skin or in
+    // the shade looks weaker than one on dark shorts, and holding it to the others' strength loses it.
+    const scores = {}, refs = {};
+    labels.forEach(l => {
+      let m = model;
+      if (opts.data0) {
+        const lm = learnColor(opts.data0, w, h, init[l][0], init[l][1]);
+        if (lm && lm.ux * model.ux + lm.uy * model.uy > Math.cos(25 * Math.PI / 180)) m = Object.assign({}, model, { mag: Math.min(model.mag, lm.mag), area: lm.area });
+      }
+      scores[l] = makeScorer(Object.assign({}, m, { tol })); refs[l] = m.area || ref;
+    });
     const st = {}; labels.forEach(l => { st[l] = { p: init[l].slice(), v: [0, 0], t: null, miss: 0 }; });
     const order = init.ankle && init.foot ? Math.sign(init.foot[0] - init.ankle[0]) || 1 : 0;
     return {
@@ -369,7 +379,7 @@ const BF = (function () {
           const s = st[l], dt = s.t == null ? 0 : Math.max(0, Math.min(0.3, t - s.t));
           const px = s.p[0] + s.v[0] * dt, py = s.p[1] + s.v[1] * dt;
           const rad = Math.min(w * 0.2, (base + Math.hypot(s.v[0], s.v[1]) * dt * 0.8) * (1 + 0.6 * Math.min(s.miss, 5)));
-          const b = searchNear(data, w, h, score, px, py, rad, ref, taken);
+          const b = searchNear(data, w, h, scores[l], px, py, rad, refs[l], taken);
           if (b) {
             if (s.t != null && dt > 0 && !s.miss) { const nv = [(b.x - s.p[0]) / dt, (b.y - s.p[1]) / dt]; s.v = [0.6 * nv[0] + 0.4 * s.v[0], 0.6 * nv[1] + 0.4 * s.v[1]]; }
             else s.v = [0, 0];
@@ -384,6 +394,28 @@ const BF = (function () {
       },
     };
   }
+  // Knee position where its sticker was not seen, from the hip and ankle: thigh and shin keep their length,
+  // so the knee sits where the two circles meet, on the side it was seen on. Marks frames with f.inferred.
+  function fillKnee(frames) {
+    const ok = frames.filter(f => f.pts.hip && f.pts.knee && f.pts.ankle);
+    if (ok.length < 15) return 0;
+    const L1 = median(ok.map(f => Math.hypot(f.pts.knee[0] - f.pts.hip[0], f.pts.knee[1] - f.pts.hip[1])));
+    const L2 = median(ok.map(f => Math.hypot(f.pts.knee[0] - f.pts.ankle[0], f.pts.knee[1] - f.pts.ankle[1])));
+    const cross = f => { const H = f.pts.hip, A = f.pts.ankle, K = f.pts.knee; return (A[0] - H[0]) * (K[1] - H[1]) - (A[1] - H[1]) * (K[0] - H[0]); };
+    const side = Math.sign(median(ok.map(cross))) || 1;
+    let n = 0;
+    frames.forEach(f => {
+      const H = f.pts.hip, A = f.pts.ankle; if (f.pts.knee || !H || !A) return;
+      const dx = A[0] - H[0], dy = A[1] - H[1], d = Math.min(Math.hypot(dx, dy), L1 + L2 - 1e-3); if (d < 1) return;
+      const a = (L1 * L1 - L2 * L2 + d * d) / (2 * d), hh = Math.sqrt(Math.max(0, L1 * L1 - a * a)), ux = dx / d, uy = dy / d;
+      const px = H[0] + a * ux, py = H[1] + a * uy, k1 = [px - hh * uy, py + hh * ux], k2 = [px + hh * uy, py - hh * ux];
+      const c1 = dx * (k1[1] - H[1]) - dy * (k1[0] - H[0]);
+      f.pts = Object.assign({}, f.pts, { knee: Math.sign(c1) === side ? k1 : k2 });
+      f.inferred = Object.assign({}, f.inferred, { knee: true }); n++;
+    });
+    return n;
+  }
+
   // Snap a tap to a sticker: nearest spot within reach, at a loose tolerance.
   function snapToSticker(data, w, h, model, x, y) {
     const b = searchNear(data, w, h, makeScorer(Object.assign({}, model, { tol: 1.7 })), x, y, Math.max(12, w * 0.04), model.area || 30, []);
@@ -788,7 +820,7 @@ const BF = (function () {
     return { next, later: cands.concat(later) };
   }
 
-  return { TOLS, rgbToHsv, learnColor, refineColor, makeScorer, createLocalTracker, snapToSticker, findBlobs, lastMask, autoTolerance, hungarian, snap, angleAt, median, cleanSeries, findPeaks, estimatePeriod, resample,
+  return { TOLS, rgbToHsv, learnColor, refineColor, makeScorer, createLocalTracker, snapToSticker, fillKnee, findBlobs, lastMask, autoTolerance, hungarian, snap, angleAt, median, cleanSeries, findPeaks, estimatePeriod, resample,
     createAnonTracker, createSession, stableTracks, autoLabelSide, autoLabelFront, learnSkeleton, skeletonError, findSwap, segmentStability, slippingSticker,
     footScale, analyzeSide, analyzeFront, recommend, status, targetFor, isMm,
     TARGETS, FRONT_TARGETS, SIDE_LABELS, FRONT_LABELS, SIDE_KEYS, FRONT_KEYS, SEGS };

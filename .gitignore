@@ -2,3 +2,4 @@ test/real/*.jpg
 test/real/*.jpeg
 test/real/*.png
 test/real/*.rgba
+test/real/*.mp4

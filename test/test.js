@@ -165,7 +165,7 @@ console.log('--- video mode: stickers named once, then followed locally (green, 
     const m = BF.refineColor(img0, W, H, BF.learnColor(img0, W, H, p0.knee[0], p0.knee[1]));
     const init = {};
     (only || BF.SIDE_LABELS).forEach(l => { init[l] = BF.snapToSticker(img0, W, H, m, p0[l][0] + 4, p0[l][1] - 3) || [p0[l][0], p0[l][1]]; });
-    const tr = BF.createLocalTracker(m, init, W, H), frames = [];
+    const tr = BF.createLocalTracker(m, init, W, H, { data0: img0 }), frames = [];
     let wrong = 0, seen = 0, sk = 9;
     for (let f = 0; f < 12 * 60; f++) { // 60 fps video, about a third of frames skipped as on a slow phone
       const t = t0 + f / 60; if ((sk = (sk * 69069 + 1) % 1000) < 330) continue;
@@ -179,6 +179,18 @@ console.log('--- video mode: stickers named once, then followed locally (green, 
     near(`${name}: knee extension`, res.metrics.kneeExt, Math.max(...k), 1.5);
     near(`${name}: cadence`, res.cadence, cad, 2);
   }
+}
+
+console.log('--- knee sticker seen on only 25% of frames: knee rebuilt from hip and ankle');
+{
+  const frames = [];
+  for (let i = 0; i < 400; i++) { const t = i / 30, p = sidePose(t, 1, 70); const pts = Object.assign({}, p); if (i % 4) pts.knee = null; frames.push({ t, pts }); }
+  const n = BF.fillKnee(frames);
+  const res = BF.analyzeSide(frames, { fps: 30, crankMm: 172.5, minCycles: 4 });
+  const k = []; for (let i = 0; i < 600; i++) { const p = sidePose(i / 100, 1, 70); k.push(BF.angleAt(p.hip, p.knee, p.ankle)); }
+  truthy('missing knee positions rebuilt', n === 300, `${n} rebuilt`);
+  near('knee extension', res.metrics.kneeExt, Math.max(...k), 1);
+  near('knee flexion', res.metrics.kneeFlex, Math.min(...k), 1);
 }
 
 console.log('--- recommendation');
