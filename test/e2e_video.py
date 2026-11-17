@@ -10,6 +10,8 @@ try:
     with sync_playwright() as pw:
         b = pw.chromium.launch(executable_path='/usr/bin/google-chrome', args=['--autoplay-policy=no-user-gesture-required'])
         pg = b.new_context(viewport={'width': 390, 'height': 844}, device_scale_factor=2, locale='fr-FR').new_page(); errs = []
+        slow = float(os.environ.get('CPU_SLOW', '1'))
+        if slow > 1: pg.context.new_cdp_session(pg).send('Emulation.setCPUThrottlingRate', {'rate': slow})
         pg.on('console', lambda m: errs.append(m.text) if m.type == 'error' and 'ERR_' not in m.text else None)
         pg.on('pageerror', lambda e: errs.append(str(e)))
         pg.goto('http://127.0.0.1:8766/index.html'); pg.wait_for_timeout(400)

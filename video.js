@@ -138,6 +138,7 @@ async function run() {
     for (let t = V.t0; t < end && !V.cancel; t += 1 / 30) { await seek(t); handle(t); }
   }
   if (V.cancel) { V.phase = 'labels'; return render(); }
+  V.raw = frames;
   analyse(frames);
 }
 
@@ -184,7 +185,8 @@ function renderResult() {
     ${ok ? `<section class="sheet"><h2>${esc(T('measurements'))}</h2><div>${FL.metricsHTML(check, t, prev)}</div></section>` : ''}
     <section class="sheet"><label class="field">${esc(T('note'))}<input type="text" id="vNote" value="${esc(V.note || '')}"></label>
       <div class="row">${ok ? `<button class="btn primary" data-act="vSave">${esc(T('b_save'))}</button>` : ''}
-        <button class="btn" data-act="vRelabel">${esc(T('vid_relabel'))}</button><button class="btn ghost" data-act="vBack">${esc(T('vid_discard'))}</button></div></section>`;
+        <button class="btn" data-act="vRelabel">${esc(T('vid_relabel'))}</button><button class="btn ghost" data-act="vBack">${esc(T('vid_discard'))}</button></div>
+      <div class="row"><button class="btn small ghost" data-act="vDiag">${esc(T('vid_diag'))}</button></div></section>`;
   showFrame(V.show);
 }
 async function showFrame(i) {
@@ -202,6 +204,20 @@ function save() {
   try { const s = document.createElement('canvas'); s.width = 320; s.height = Math.round(320 * V.H / V.W); s.getContext('2d').drawImage(c, 0, 0, s.width, s.height); thumb = s.toDataURL('image/jpeg', 0.6); } catch (e) { /* no thumbnail */ }
   const note = ($('#vNote') || {}).value || '';
   if (FL.saveCheck(FL.makeCheck(V.view, V.result, thumb, note, 'video'))) { toast(T('saved')); cleanup(); FL.go('rider'); }
+}
+// Everything needed to replay this analysis elsewhere: the naming frame, the colour, the taps and where
+// each sticker was found on every processed frame. No other personal data.
+function diagnostic() {
+  let frame = null;
+  try { const c = document.createElement('canvas'); c.width = V.W; c.height = V.H; c.getContext('2d').putImageData(V.frame, 0, 0); frame = c.toDataURL('image/jpeg', 0.85); } catch (e) { /* no image */ }
+  const d = { app: 'fit-loop-diagnostic', version: 1, created: new Date().toISOString(), userAgent: navigator.userAgent, view: V.view,
+    video: { w: V.srcW, h: V.srcH, duration: V.duration }, analysis: { w: V.W, h: V.H, t0: V.t0 }, model: V.model, init: V.init,
+    frames: (V.raw || []).map(f => [Math.round(f.t * 1000) / 1000, Object.fromEntries(Object.entries(f.pts).map(([k, p]) => [k, p ? [Math.round(p[0]), Math.round(p[1])] : null]))]),
+    seen: V.seen, frame };
+  const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([JSON.stringify(d)], { type: 'application/json' }));
+  a.download = 'fit-loop-diagnostic-' + new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-') + '.json';
+  document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+  toast(T('vid_diag_saved'));
 }
 function cleanup() { try { vid.pause(); } catch (e) { /* not playing */ } vid.removeAttribute('src'); if (V.url) URL.revokeObjectURL(V.url); V.url = null; }
 
@@ -233,6 +249,7 @@ FL.video = {
       case 'vCancel': V.cancel = true; return;
       case 'vRelabel': V.phase = 'labels'; V.init = {}; V.li = 0; return grab().then(render);
       case 'vSave': return save();
+      case 'vDiag': return diagnostic();
       case 'vBack': cleanup(); return FL.go('rider');
     }
   },

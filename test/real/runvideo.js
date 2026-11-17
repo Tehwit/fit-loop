@@ -5,7 +5,7 @@ const [file, t0s, secs, initJ] = process.argv.slice(2), W = +(process.argv[6] ||
 const named = JSON.parse(initJ);
 function frames(start, dur, onFrame) {
   return new Promise(res => {
-    const ff = spawn('ffmpeg', ['-loglevel', 'error', '-ss', String(start), '-i', file, '-t', String(dur), '-f', 'rawvideo', '-pix_fmt', 'rgba', '-']);
+    const ff = spawn('ffmpeg', ['-loglevel', 'error', '-ss', String(start), '-i', file, '-t', String(dur), '-vf', 'scale=' + W + ':' + H, '-f', 'rawvideo', '-pix_fmt', 'rgba', '-']);
     let buf = Buffer.alloc(0), i = 0; const size = W * H * 4;
     ff.stdout.on('data', d => { buf = Buffer.concat([buf, d]); while (buf.length >= size) { onFrame(new Uint8ClampedArray(buf.subarray(0, size)), i++); buf = buf.subarray(size); } });
     ff.on('close', res);
