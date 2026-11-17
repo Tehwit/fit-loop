@@ -310,6 +310,86 @@ const BF = (function () {
     return out;
   }
 
+  // ---------- video: follow stickers the user named once ----------
+  // Same colour rule as findBlobs, for one pixel. Returns <= 1 when the pixel looks like a sticker.
+  function makeScorer(model) {
+    const t = model.tol || 1, iMin = model.iMin, ux = model.ux, uy = model.uy;
+    const pMin = Math.max(0.11, model.mag * 0.45) * (t < 1 ? 1 / t : 1), tanA = Math.tan(Math.min(40, 16 * t) * Math.PI / 180);
+    return (r, g, b) => {
+      const s = r + g + b + 1; if (s < iMin) return 1e9;
+      const x = (r - g) / s, y = (r + g - 2 * b) / s, proj = x * ux + y * uy; if (proj <= 0) return 1e9;
+      return Math.max(Math.abs(y * ux - x * uy) / (proj * tanA), (pMin + 6 / s) / proj);
+    };
+  }
+
+  // Looks for the sticker-coloured spot nearest to (cx, cy) within rad, skipping spots already taken.
+  let _lb = null, _ls = null;
+  function searchNear(data, w, h, score, cx, cy, rad, ref, taken) {
+    const x0 = Math.max(0, Math.floor(cx - rad)), x1 = Math.min(w - 1, Math.ceil(cx + rad)), y0 = Math.max(0, Math.floor(cy - rad)), y1 = Math.min(h - 1, Math.ceil(cy + rad));
+    const ww = x1 - x0 + 1, hh = y1 - y0 + 1; if (ww < 2 || hh < 2) return null;
+    if (!_lb || _lb.length < ww * hh) { _lb = new Uint8Array(ww * hh * 2); _ls = new Int32Array(ww * hh * 2); }
+    const m = _lb, stack = _ls;
+    for (let y = 0; y < hh; y++) for (let x = 0; x < ww; x++) { const i = ((y + y0) * w + x + x0) * 4; m[y * ww + x] = score(data[i], data[i + 1], data[i + 2]) <= 1 ? 1 : 0; }
+    let best = null, bestCost = Infinity;
+    for (let p = 0; p < ww * hh; p++) {
+      if (m[p] !== 1) continue;
+      let sp = 0, area = 0, sx = 0, sy = 0, bx0 = ww, bx1 = 0, by0 = hh, by1 = 0;
+      stack[sp++] = p; m[p] = 2;
+      while (sp) {
+        const q = stack[--sp], qx = q % ww, qy = (q - qx) / ww;
+        area++; sx += qx; sy += qy; if (qx < bx0) bx0 = qx; if (qx > bx1) bx1 = qx; if (qy < by0) by0 = qy; if (qy > by1) by1 = qy;
+        if (qx > 0 && m[q - 1] === 1) { m[q - 1] = 2; stack[sp++] = q - 1; }
+        if (qx < ww - 1 && m[q + 1] === 1) { m[q + 1] = 2; stack[sp++] = q + 1; }
+        if (qy > 0 && m[q - ww] === 1) { m[q - ww] = 2; stack[sp++] = q - ww; }
+        if (qy < hh - 1 && m[q + ww] === 1) { m[q + ww] = 2; stack[sp++] = q + ww; }
+      }
+      if (area < Math.max(3, ref * 0.1) || area > ref * 8) continue;
+      const fillR = area / ((bx1 - bx0 + 1) * (by1 - by0 + 1)); if (fillR < 0.3) continue;
+      const x = sx / area + 0.5 + x0, y = sy / area + 0.5 + y0;
+      if (taken.some(q => Math.hypot(q[0] - x, q[1] - y) < 4)) continue;
+      const d = Math.hypot(x - cx, y - cy); if (d > rad) continue;
+      const cost = d / rad + 0.4 * Math.abs(Math.log(area / ref));
+      if (cost < bestCost) { bestCost = cost; best = { x, y, area }; }
+    }
+    return best;
+  }
+
+  // init: {label: [x, y]} named on one frame. step(data, t) -> {label: [x, y] | null}
+  function createLocalTracker(model, init, w, h, opts) {
+    opts = opts || {};
+    const score = makeScorer(Object.assign({}, model, { tol: opts.tol || 1.7 }));
+    const labels = Object.keys(init), ref = model.area || 30, base = Math.max(10, w * 0.035);
+    const st = {}; labels.forEach(l => { st[l] = { p: init[l].slice(), v: [0, 0], t: null, miss: 0 }; });
+    const order = init.ankle && init.foot ? Math.sign(init.foot[0] - init.ankle[0]) || 1 : 0;
+    return {
+      labels,
+      step(data, t) {
+        const out = {}, taken = [];
+        labels.slice().sort((a, b) => st[a].miss - st[b].miss).forEach(l => {
+          const s = st[l], dt = s.t == null ? 0 : Math.max(0, Math.min(0.3, t - s.t));
+          const px = s.p[0] + s.v[0] * dt, py = s.p[1] + s.v[1] * dt;
+          const rad = Math.min(w * 0.2, (base + Math.hypot(s.v[0], s.v[1]) * dt * 0.8) * (1 + 0.6 * Math.min(s.miss, 5)));
+          const b = searchNear(data, w, h, score, px, py, rad, ref, taken);
+          if (b) {
+            if (s.t != null && dt > 0 && !s.miss) { const nv = [(b.x - s.p[0]) / dt, (b.y - s.p[1]) / dt]; s.v = [0.6 * nv[0] + 0.4 * s.v[0], 0.6 * nv[1] + 0.4 * s.v[1]]; }
+            else s.v = [0, 0];
+            s.p = [b.x, b.y]; s.t = t; s.miss = 0; out[l] = [b.x, b.y]; taken.push(out[l]);
+          } else { s.miss++; s.v = [s.v[0] * 0.5, s.v[1] * 0.5]; out[l] = null; }
+        });
+        // side view: the ball of the foot stays ahead of the ankle bone all the way round
+        if (order && out.ankle && out.foot && order * (out.foot[0] - out.ankle[0]) < 0) {
+          [out.ankle, out.foot] = [out.foot, out.ankle]; [st.ankle, st.foot] = [st.foot, st.ankle];
+        }
+        return out;
+      },
+    };
+  }
+  // Snap a tap to a sticker: nearest spot within reach, at a loose tolerance.
+  function snapToSticker(data, w, h, model, x, y) {
+    const b = searchNear(data, w, h, makeScorer(Object.assign({}, model, { tol: 1.7 })), x, y, Math.max(12, w * 0.04), model.area || 30, []);
+    return b ? [b.x, b.y] : null;
+  }
+
   // ---------- anonymous multi-target tracking (live) ----------
   // Tracks every blob without knowing which joint it is. Labels are attached afterwards (autoLabel*).
   function createAnonTracker(w, opts) {
@@ -708,7 +788,7 @@ const BF = (function () {
     return { next, later: cands.concat(later) };
   }
 
-  return { TOLS, rgbToHsv, learnColor, refineColor, findBlobs, lastMask, autoTolerance, hungarian, snap, angleAt, median, cleanSeries, findPeaks, estimatePeriod, resample,
+  return { TOLS, rgbToHsv, learnColor, refineColor, makeScorer, createLocalTracker, snapToSticker, findBlobs, lastMask, autoTolerance, hungarian, snap, angleAt, median, cleanSeries, findPeaks, estimatePeriod, resample,
     createAnonTracker, createSession, stableTracks, autoLabelSide, autoLabelFront, learnSkeleton, skeletonError, findSwap, segmentStability, slippingSticker,
     footScale, analyzeSide, analyzeFront, recommend, status, targetFor, isMm,
     TARGETS, FRONT_TARGETS, SIDE_LABELS, FRONT_LABELS, SIDE_KEYS, FRONT_KEYS, SEGS };

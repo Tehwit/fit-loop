@@ -102,6 +102,7 @@ function render() {
   document.documentElement.lang = lang; $('#langBtn').textContent = lang === 'fr' ? 'EN' : 'FR';
   if (S.view === 'rider') return renderRider();
   if (S.view === 'check') return renderCheck();
+  if (S.view === 'video') return FL.video ? FL.video.render() : go('rider');
   renderHome();
 }
 
@@ -160,8 +161,10 @@ function renderRider() {
     <section class="stack"><button class="btn ghost small" data-act="home" style="width:fit-content">${esc(T('back_riders'))}</button>
       <div class="stack" style="gap:4px"><span class="eyebrow">${esc(T('d_' + r.discipline))}${r.bike ? ' · ' + esc(r.bike) : ''} · ${num(r.crankMm || 172.5, 1)} mm</span><h1>${esc(r.name)}</h1></div></section>
     ${rec ? changeHTML(rec, T('next')) : `<section class="sheet"><h3>${esc(T('first_check'))}</h3><p class="muted">${esc(T('first_check_p'))}</p></section>`}
-    <div class="row"><button class="btn primary" data-act="live" data-v="side">${esc(T('start_side'))}</button><button class="btn" data-act="live" data-v="front">${esc(T('start_front'))}</button>
-      <button class="btn ghost small" data-act="video" data-v="side">${esc(T('use_video'))}</button></div>
+    <div class="row"><button class="btn primary" data-act="vRecord" data-v="side">${esc(T('vid_record_side'))}</button><button class="btn" data-act="vPick" data-v="side">${esc(T('vid_pick'))}</button></div>
+    <div class="row"><button class="btn small" data-act="vRecord" data-v="front">${esc(T('vid_record_front'))}</button><button class="btn small" data-act="vPick" data-v="front">${esc(T('vid_pick_front'))}</button>
+      <button class="btn ghost small" data-act="live" data-v="side">${esc(T('live_beta'))}</button></div>
+    <p class="muted small">${esc(T('vid_tips'))}</p>
     <section class="sheet"><details ${cs.length ? '' : 'open'}><summary>${esc(T('prep'))}</summary>
       <div class="guide"><div class="stack">${guideSVG('side')}${guideSVG('front')}</div>
         <div class="stack"><h3>${esc(T('stickers'))}</h3><ol class="tips"><li>${esc(T('prep_s1'))}</li><li>${esc(T('prep_s2'))}</li><li>${esc(T('prep_s3'))}</li><li>${esc(T('prep_f1'))}</li></ol>
@@ -419,6 +422,44 @@ function draw(out) {
   }
 }
 
+// Skeleton for any canvas: lines between joints, joint dots, optional names and angles.
+function drawPose(ctx, P, view, K, names, angles) {
+  const acc = '#ff6a1f', segs = view === 'side' ? [['wrist', 'elbow'], ['elbow', 'shoulder'], ['shoulder', 'hip'], ['hip', 'knee'], ['knee', 'ankle'], ['ankle', 'foot']] : [['kneeL', 'footL'], ['kneeR', 'footR']];
+  ctx.lineCap = 'round';
+  segs.forEach(([a, b]) => {
+    const p = P[a], q = P[b]; if (!p || !q) return;
+    ctx.strokeStyle = 'rgba(0,0,0,.55)'; ctx.lineWidth = 6 * K; ctx.beginPath(); ctx.moveTo(p[0], p[1]); ctx.lineTo(q[0], q[1]); ctx.stroke();
+    ctx.strokeStyle = acc; ctx.lineWidth = 3 * K; ctx.beginPath(); ctx.moveTo(p[0], p[1]); ctx.lineTo(q[0], q[1]); ctx.stroke();
+  });
+  const label = (text, x, y, big) => {
+    ctx.font = big ? `600 ${Math.round(15 * K)}px "IBM Plex Mono", ui-monospace, monospace` : `600 ${Math.round(12 * K)}px "IBM Plex Sans", system-ui, sans-serif`;
+    const w = ctx.measureText(text).width + 8 * K, h = (big ? 20 : 17) * K; x = Math.max(0, Math.min(ctx.canvas.width - w, x));
+    ctx.fillStyle = 'rgba(16,20,26,.82)'; ctx.fillRect(x, y - h + 4 * K, w, h); ctx.fillStyle = '#fff'; ctx.fillText(text, x + 4 * K, y);
+  };
+  Object.keys(P).forEach(l => {
+    const p = P[l]; if (!p) return;
+    ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.arc(p[0], p[1], 5 * K, 0, 7); ctx.fill(); ctx.fillStyle = acc; ctx.beginPath(); ctx.arc(p[0], p[1], 3 * K, 0, 7); ctx.fill();
+    if (names) label(T('l_' + l), p[0] + 10 * K, p[1] - 10 * K);
+  });
+  if (angles && view === 'side') {
+    const d = P.foot && P.hip ? Math.sign(P.foot[0] - P.hip[0]) || 1 : 1, off = d > 0 ? 12 * K : -60 * K;
+    if (P.hip && P.knee && P.ankle) label(Math.round(BF.angleAt(P.hip, P.knee, P.ankle)) + '°', P.knee[0] + off, P.knee[1] + 5 * K, true);
+    if (P.shoulder && P.hip && P.knee) label(Math.round(BF.angleAt(P.shoulder, P.hip, P.knee)) + '°', P.hip[0] - off - 48 * K, P.hip[1] + 5 * K, true);
+  }
+}
+function defaultNote(view) {
+  const prev = lastCheck(S.riderId, view);
+  return !prev ? T('note_start') : prev.rec && prev.rec.next ? T('note_after', { what: lower1(recText(prev.rec.next).title) }) : '';
+}
+function makeCheck(view, res, thumb, note, source) {
+  const metrics = {}; Object.keys(res.metrics || {}).forEach(k => { if (Number.isFinite(res.metrics[k])) metrics[k] = Math.round(res.metrics[k] * 10) / 10; });
+  return { id: uid('c'), riderId: S.riderId, created: Date.now(), view, note: note != null ? note : defaultNote(view), cadence: res.cadence, cycles: res.cycles, metrics,
+    rec: BF.recommend(metrics, view, targetsFor(DB.rider(S.riderId))), thumb, source: source || 'live',
+    quality: { pathRatio: res.pathRatio || null, slip: res.slip || null, stable: !!res.stable } };
+}
+function storeCheck(check) { DB.data.checks.push(check); if (!DB.save()) { DB.data.checks.pop(); return false; } return true; }
+window.FL = { $, esc, T, num, toast, go: v => go(v), rider: () => DB.rider(S.riderId), targetsFor, lastCheck, changeHTML, metricsHTML, makeCheck, saveCheck: storeCheck, defaultNote, drawPose };
+
 // ---- HUD ----
 function tile(k, v, prev) {
   const range = BF.targetFor(k, L.targets), st = BF.status(v, range), mm = BF.isMm(k);
@@ -514,19 +555,20 @@ function importData(file) {
 
 // ---------------- events ----------------
 document.addEventListener('click', e => { const b = e.target.closest('[data-act]'); if (b) act(b.dataset.act, b); });
-$('#fileVideo').addEventListener('change', e => { const f = e.target.files[0]; e.target.value = ''; if (f) startLive(L.pendingView || 'side', f); });
 $('#fileImport').addEventListener('change', e => { const f = e.target.files[0]; e.target.value = ''; if (f) importData(f); });
 document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && L.on && navigator.wakeLock) navigator.wakeLock.request('screen').then(w => { L.wake = w; }).catch(() => {}); });
 
 function act(a, b) {
   const s = DB.data.settings;
+  if (/^v[A-Z]/.test(a) && a !== 'vRecord' && a !== 'vPick') return FL.video && FL.video.act(a, b);
   switch (a) {
     case 'home': if (L.on) stopLive(true); return go('home');
     case 'lang': lang = lang === 'fr' ? 'en' : 'fr'; s.lang = lang; DB.save(); return render();
     case 'openRider': return go('rider', { riderId: b.dataset.id });
     case 'openCheck': return go('check', { checkId: b.dataset.id });
     case 'live': return startLive(b.dataset.v);
-    case 'video': L.pendingView = b.dataset.v; return $('#fileVideo').click();
+    case 'vRecord': return FL.video.open(b.dataset.v);
+    case 'vPick': return FL.video.pick(b.dataset.v);
     case 'export': return exportData();
     case 'import': return $('#fileImport').click();
     case 'quit': return stopLive();

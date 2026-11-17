@@ -157,6 +157,30 @@ console.log('--- real room photos (kept out of git; skipped when absent)');
   });
 }
 
+console.log('--- video mode: stickers named once, then followed locally (green, realistic room)');
+{
+  const ro = { hard: true, color: [20, 190, 125] };
+  for (const [dir, cad, only, name] of [[1, 90, null, '7 stickers, 90 rpm'], [-1, 80, ['hip', 'knee', 'ankle', 'foot'], '4 stickers, facing left, 80 rpm']]) {
+    const t0 = 0.4, p0 = sidePose(t0, dir, cad), img0 = render(p0, 5, only, ro);
+    const m = BF.refineColor(img0, W, H, BF.learnColor(img0, W, H, p0.knee[0], p0.knee[1]));
+    const init = {};
+    (only || BF.SIDE_LABELS).forEach(l => { init[l] = BF.snapToSticker(img0, W, H, m, p0[l][0] + 4, p0[l][1] - 3) || [p0[l][0], p0[l][1]]; });
+    const tr = BF.createLocalTracker(m, init, W, H), frames = [];
+    let wrong = 0, seen = 0, sk = 9;
+    for (let f = 0; f < 12 * 60; f++) { // 60 fps video, about a third of frames skipped as on a slow phone
+      const t = t0 + f / 60; if ((sk = (sk * 69069 + 1) % 1000) < 330) continue;
+      const p = sidePose(t, dir, cad), pts = tr.step(render(p, f + 50, only, ro), t);
+      Object.keys(pts).forEach(l => { if (!pts[l]) return; seen++; if (Math.hypot(pts[l][0] - p[l][0], pts[l][1] - p[l][1]) > 4) wrong++; });
+      frames.push({ t, pts });
+    }
+    const res = BF.analyzeSide(BF.resample(frames, BF.SIDE_LABELS, 30), { fps: 30, crankMm: 172.5, minCycles: 4 });
+    const k = []; for (let i = 0; i < 600; i++) { const p = sidePose(i / 100, dir, cad); k.push(BF.angleAt(p.hip, p.knee, p.ankle)); }
+    truthy(`${name}: stickers followed`, wrong <= seen * 0.01, `${wrong} wrong of ${seen}`);
+    near(`${name}: knee extension`, res.metrics.kneeExt, Math.max(...k), 1.5);
+    near(`${name}: cadence`, res.cadence, cad, 2);
+  }
+}
+
 console.log('--- recommendation');
 {
   const rec = BF.recommend({ kneeExt: 135, kneeFlex: 67, hipMin: 44, torso: 37, shoulder: 97, elbow: 157, ankleRom: 26, kops: 8 }, 'side', BF.TARGETS.road_endurance);
