@@ -159,14 +159,19 @@ function renderResult() {
   const check = FL.makeCheck(V.view, res, null);
   const prev = FL.lastCheck(r.id, V.view);
   const warn = [];
-  labels.forEach(l => { const c = res.coverage ? res.coverage[l] : 1; if (c != null && c < 0.85) warn.push(T('vid_lost', { label: T('l_' + l), pct: Math.round((1 - c) * 100) })); });
   if (res.cycles < 2) warn.push(T('vid_few'));
   if (res.slip) warn.push(T('warn_slip', { label: T('l_' + res.slip) }));
   if (res.pathRatio && res.pathRatio < 0.93) warn.push(T('warn_yaw', { deg: Math.round(Math.acos(Math.min(1, res.pathRatio)) * 180 / Math.PI) }));
-  const ok = res.cycles >= 2;
+  // Leg stickers must be followed on most frames, or the angles come from too few points to be trusted.
+  const legs = V.view === 'side' ? ['hip', 'knee', 'ankle', 'foot'] : ['kneeL', 'kneeR', 'footL', 'footR'];
+  const cov = labels.map(l => [l, res.coverage ? res.coverage[l] || 0 : 0]);
+  const weak = cov.filter(([l, c]) => legs.includes(l) && c < 0.8);
+  const ok = res.cycles >= 2 && !weak.length;
   app.innerHTML = `
     <section class="stack"><span class="eyebrow">${esc(r.name)} · ${esc(T(V.view))}${res.cadence ? ' · ' + Math.round(res.cadence) + ' ' + esc(T('rpm')) : ''} · ${res.cycles} ${esc(T('strokes'))}</span>
-      <h1>${esc(T(ok ? 'vid_done' : 'vid_failed'))}</h1></section>
+      <h1>${esc(T(ok ? 'vid_done' : weak.length ? 'vid_unreliable' : 'vid_failed'))}</h1></section>
+    <section class="sheet"><h3>${esc(T('vid_coverage'))}</h3><div class="chips">${cov.map(([l, c]) => `<span class="chip ${c >= 0.9 ? 'ok' : c >= 0.8 ? 'near' : 'out'}">${esc(T('l_' + l))} ${Math.round(c * 100)} %</span>`).join('')}</div>
+      ${weak.length ? `<p class="small">${esc(T('vid_unreliable_p'))}</p>` : ''}</section>
     <div class="frame"><canvas id="vRes" width="${V.W}" height="${V.H}" style="width:100%;height:auto;display:block"></canvas></div>
     <label class="field"><span>${esc(T('vid_review'))}</span><input type="range" id="vScrub" min="0" max="${V.frames.length - 1}" step="1" value="${V.show}"></label>
     ${warn.length ? `<div class="warn">${warn.map(w => `<p>${esc(w)}</p>`).join('')}</div>` : ''}
