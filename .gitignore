@@ -1,0 +1,4 @@
+test/real/*.jpg
+test/real/*.jpeg
+test/real/*.png
+test/real/*.rgba

@@ -71,9 +71,11 @@ const BF = (function () {
     syy = syy / n + st * st + (sr * sr - st * st) * uy * uy;
     sxy = sxy / n + (sr * sr - st * st) * ux * uy;
     const det = sxx * syy - sxy * sxy;
+    // Typical strength of the sticker colour (median of its pixels, glare and edges excluded by the median).
+    const mags = fx.map((v, k2) => Math.hypot(v, fy[k2]));
     return {
-      mx, my, ixx: syy / det, ixy: -sxy / det, iyy: sxx / det,
-      iMin: Math.max(40, 0.35 * pctl(fi, 0.1)),
+      mx, my, ixx: syy / det, ixy: -sxy / det, iyy: sxx / det, ux, uy, mag: pctl(mags, 0.5),
+      iMin: Math.max(90, 0.35 * pctl(fi, 0.1)),
       area: n, size: Math.max(maxx - minx + 1, maxy - miny + 1), h: seed.h, tol: 1, x: sx, y: sy,
     };
   }
@@ -104,12 +106,21 @@ const BF = (function () {
     const n = w * h;
     if (!_mask || _mask.length !== n) { _mask = new Uint8Array(n); _tmp = new Uint8Array(n); _stack = new Int32Array(n); _pix = new Int32Array(n * 2); _d = new Float32Array(n); }
     const mask = _mask, tmp = _tmp, dm = _d;
-    const t = model.tol || 1, th = 9 * t * t, iMin = model.iMin, mx = model.mx, my = model.my, a = model.ixx, b2 = 2 * model.ixy, c = model.iyy;
+    // A pixel matches when its colour points the same way as the sticker's (hue) and is strong enough
+    // (saturation). The strength floor never drops near grey: dark objects and shadows carry a faint
+    // colour cast from camera noise, and letting those in is what made the count jump to 40.
+    const t = model.tol || 1, iMin = model.iMin, ux = model.ux, uy = model.uy;
+    // Floor around 0.11-0.17: dim stickers in shade measured ~0.2, near-grey dark objects up to ~0.1 (real room, Nov 2026).
+    const pMin = Math.max(0.11, model.mag * 0.45) * (t < 1 ? 1 / t : 1), tanA = Math.tan(Math.min(40, 16 * t) * Math.PI / 180);
+    const th = 1;
     for (let i = 0, p = 0; p < n; p++, i += 4) {
       const r = data[i], g = data[i + 1], bl = data[i + 2], s = r + g + bl + 1;
       if (s < iMin) { tmp[p] = 0; dm[p] = 1e9; continue; }
-      const dx = (r - g) / s - mx, dy = (r + g - 2 * bl) / s - my, d2 = a * dx * dx + b2 * dx * dy + c * dy * dy;
-      dm[p] = d2; tmp[p] = d2 <= th ? 1 : 0;
+      const x = (r - g) / s, y = (r + g - 2 * bl) / s, proj = x * ux + y * uy;
+      if (proj <= 0) { tmp[p] = 0; dm[p] = 1e9; continue; }
+      // camera noise makes the colour of dark pixels unreliable: ask them for a stronger colour (+6/brightness)
+      const perp = Math.abs(y * ux - x * uy), sc = Math.max(perp / (proj * tanA), (pMin + 6 / s) / proj); // <= 1 inside
+      dm[p] = sc; tmp[p] = sc <= th ? 1 : 0;
     }
     // close 1-pixel gaps (highlights, blur) with a 3x3 dilation
     for (let y = 0; y < h; y++) { const o = y * w; for (let x = 0; x < w; x++) { const p = o + x; mask[p] = tmp[p] | (x > 0 ? tmp[p - 1] : 0) | (x < w - 1 ? tmp[p + 1] : 0); } }
@@ -129,7 +140,7 @@ const BF = (function () {
       // Look again inside it, keeping only the pixels closest to the sticker colour.
       let found = false;
       if (blob.area >= minArea && blob.area <= ref * 25) {
-        const core = th * 0.3, list = _pix.subarray(0, blob.area);
+        const core = 0.6, list = _pix.subarray(0, blob.area);
         for (let k = 0; k < list.length; k++) { const q = list[k]; if (dm[q] <= core) tmp[q] = 1; }
         for (let k = 0; k < list.length; k++) {
           const q = list[k]; if (tmp[q] !== 1) continue;
@@ -145,19 +156,40 @@ const BF = (function () {
   }
   function lastMask() { return _mask; }
 
-  // Try a range of tolerances on one frame and keep the middle of the widest range that finds an
-  // expected number of stickers (4, 5 or 7 from the side). Returns null when none does.
+  // Relearn the colour from every sticker found with the first model, so the result no longer depends on
+  // which sticker was tapped (a bright hip sticker or a dark one in the shade of the feet).
+  function refineColor(data, w, h, model) {
+    const found = findBlobs(data, w, h, Object.assign({}, model, { tol: 1 }));
+    const ms = [];
+    found.slice(0, 8).forEach(b => {
+      const m = learnColor(data, w, h, b.x, b.y);
+      if (m && m.ux * model.ux + m.uy * model.uy > Math.cos(22 * Math.PI / 180)) ms.push(m);
+    });
+    if (ms.length < 2) return model;
+    let ux = 0, uy = 0; ms.forEach(m => { ux += m.ux; uy += m.uy; });
+    const l = Math.hypot(ux, uy); ux /= l; uy /= l;
+    const area = median(ms.map(m => m.area));
+    return Object.assign({}, model, { ux, uy, mag: median(ms.map(m => m.mag)), iMin: Math.max(90, Math.min(...ms.map(m => m.iMin))), area, n: ms.length });
+  }
+
+  // Pick a tolerance inside the range that finds an expected number of stickers (4, 5 or 7 from the side)
+  // over at least two steps. Never chase a count by loosening further: when a sticker is too dark
+  // to see, the honest answer is "I see 3", not a false fourth sticker.
   const TOLS = [0.35, 0.45, 0.6, 0.8, 1, 1.3, 1.7, 2.2, 3];
   function autoTolerance(data, w, h, model, counts) {
     const ns = TOLS.map(t => findBlobs(data, w, h, Object.assign({}, model, { tol: t })).length);
-    let best = null;
-    for (let i = 0; i < TOLS.length; i++) {
-      if (!counts.includes(ns[i])) continue;
-      let j = i; while (j + 1 < TOLS.length && ns[j + 1] === ns[i]) j++;
-      if (!best || j - i > best[1] - best[0] || (j - i === best[1] - best[0] && ns[i] > ns[best[0]])) best = [i, j];
-      i = j;
+    for (let i = 0; i < TOLS.length - 1; i++) {
+      if (counts.includes(ns[i]) && ns[i + 1] === ns[i]) {
+        // middle of the range that gives this count: at its lower edge, glare or shade can cut a sticker in two
+        let j = i; while (j + 1 < TOLS.length && ns[j + 1] === ns[i]) j++;
+        const k = Math.min(i + Math.floor((j - i) / 2), TOLS.indexOf(1.3) >= i ? Math.max(i, TOLS.indexOf(1.3)) : i);
+        return { tol: TOLS[k], n: ns[i], counts: ns };
+      }
     }
-    return { tol: best ? TOLS[Math.floor((best[0] + best[1]) / 2)] : null, n: best ? ns[best[0]] : null, counts: ns };
+    for (let i = 0; i < TOLS.length - 1; i++) { // no plateau: accept a valid count that grows by at most one next step
+      if (counts.includes(ns[i]) && ns[i + 1] - ns[i] <= 1 && TOLS[i] <= 1.7) return { tol: TOLS[i], n: ns[i], counts: ns };
+    }
+    return { tol: null, n: null, counts: ns };
   }
 
   // ---------- tracking ----------
@@ -676,7 +708,7 @@ const BF = (function () {
     return { next, later: cands.concat(later) };
   }
 
-  return { TOLS, rgbToHsv, learnColor, findBlobs, lastMask, autoTolerance, hungarian, snap, angleAt, median, cleanSeries, findPeaks, estimatePeriod, resample,
+  return { TOLS, rgbToHsv, learnColor, refineColor, findBlobs, lastMask, autoTolerance, hungarian, snap, angleAt, median, cleanSeries, findPeaks, estimatePeriod, resample,
     createAnonTracker, createSession, stableTracks, autoLabelSide, autoLabelFront, learnSkeleton, skeletonError, findSwap, segmentStability, slippingSticker,
     footScale, analyzeSide, analyzeFront, recommend, status, targetFor, isMm,
     TARGETS, FRONT_TARGETS, SIDE_LABELS, FRONT_LABELS, SIDE_KEYS, FRONT_KEYS, SEGS };

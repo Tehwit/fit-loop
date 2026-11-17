@@ -287,11 +287,12 @@ function watchTilt() {
 
 const counts = () => (L.view === 'side' ? [4, 5, 7] : [4]);
 function learnColor(img, W, H, x, y) {
-  const m = BF.learnColor(img.data, W, H, x, y);
-  if (!m) { toast(T('color_dull')); return; }
+  const m0 = BF.learnColor(img.data, W, H, x, y);
+  if (!m0) { toast(T('color_dull')); return; }
+  const m = BF.refineColor(img.data, W, H, m0); // relearn from every sticker found, not only the tapped one
   L.model = m; L.pickMode = false; L.autoTol = true;
   const at = BF.autoTolerance(img.data, W, H, m, counts());
-  L.tol = at.tol || 1;
+  L.tol = at.tol || 1; // none found: stay at the default and show the real count
   saveModel();
   if (L.ses) L.ses.reset(); L.frames = []; L.result = null;
   toast(T('color_learned') + (at.tol ? ' ' + T('tol_set', { n: at.n }) : '')); renderTools();
@@ -320,7 +321,7 @@ function frame() {
   L.rejected = [];
   L.blobs = L.model ? BF.findBlobs(img.data, W, H, Object.assign({}, L.model, { tol: L.tol }), { rejected: L.rejected }) : [];
   // wrong number of stickers for a while: try other tolerances on this frame
-  if (L.model && L.autoTol && L.out.state === 'search' && L.out.reason === 'count' && t - L.lastTune > 2) {
+  if (L.model && L.autoTol && L.out.state === 'search' && L.out.reason === 'count' && !counts().includes(L.blobs.length) && t - L.lastTune > 3) {
     L.lastTune = t;
     const at = BF.autoTolerance(img.data, W, H, L.model, counts());
     if (at.tol && at.tol !== L.tol) { L.tol = at.tol; saveModel(); L.blobs = BF.findBlobs(img.data, W, H, Object.assign({}, L.model, { tol: L.tol }), { rejected: (L.rejected = []) }); }
@@ -435,7 +436,7 @@ function renderHud(t) {
     const n = L.blobs.length;
     status = out.reason === 'still' || (out.reason === 'count' && counts().includes(n)) ? T('live_still') : out.reason === 'unsure' ? T('live_unsure') : out.reason === 'lost' ? T('live_lost') : T('live_count', { n, need: T('need_' + L.view) });
     body = `<div class="bigcount${counts().includes(n) ? ' good' : ''}">${n}<small> / ${esc(T('need_' + L.view))}</small></div><p class="muted small">${esc(T('live_tap_hint'))}</p>`;
-    if (n > 7) warn.push(T('warn_many', { n }));
+    if (n > 7 || L.rejected.length > 12) warn.push(T('warn_many', { n: n + L.rejected.length }));
     // say the count aloud when it settles on a new value, so the rider hears it from the bike
     if (n !== L.countSeen) { L.countSeen = n; L.countSince = t; L.countSaid = false; }
     else if (!L.countSaid && t - L.countSince > 1.5 && out.reason === 'count' && !counts().includes(n)) { L.countSaid = true; say(T('v_count', { n }), true); }

@@ -9,7 +9,7 @@ const truthy = (name, ok, info) => { if (!ok) fails++; console.log(`${ok ? 'PASS
 function runLive({ view = 'side', dir = 1, cad = 90, secs = 14, only = null, drop = 0, camFps = 30, ro = null }) {
   const poseAt = t => (view === 'side' ? sidePose(t, dir, cad) : frontPose(t, cad));
   const p0 = poseAt(0), key = view === 'side' ? 'knee' : 'kneeL';
-  const model = BF.learnColor(render(p0, 1, only, ro), W, H, p0[key][0] + 1, p0[key][1] - 1);
+  const img0 = render(p0, 1, only, ro), model = BF.refineColor(img0, W, H, BF.learnColor(img0, W, H, p0[key][0] + 1, p0[key][1] - 1));
   const at = BF.autoTolerance(render(p0, 2, only, ro), W, H, model, view === 'side' ? [4, 5, 7] : [4]);
   if (at.tol) model.tol = at.tol;
   let sk = 5;
@@ -112,12 +112,12 @@ console.log('--- rider gets off for 4 s, then pedals again');
   truthy('labels correct after return', wrong === 0, `${wrong} wrong`);
 }
 
-console.log('--- detection in a realistic room: blue stickers, bluish wall, navy shorts, blue bottle and jeans');
+console.log('--- detection in a realistic room: green stickers, bluish wall, navy shorts, blue bottle, jeans, glare, uneven light');
 {
-  const BLUE = [30, 95, 225];
+  const BLUE = [20, 190, 125]; // colour measured on the real green stickers (Nov 2026)
   for (const r of [4, 5, 7]) {
     const ro = { hard: true, color: BLUE, r }, p = sidePose(0.3, 1, 90), img = render(p, 11, null, ro);
-    const m = BF.learnColor(img, W, H, p.knee[0] + 2, p.knee[1] + 1);
+    const m = BF.refineColor(img, W, H, BF.learnColor(img, W, H, p.knee[0] + 2, p.knee[1] + 1));
     const at = BF.autoTolerance(img, W, H, m, [4, 5, 7]);
     let ok = 0;
     for (let f = 0; f < 30; f++) {
@@ -133,6 +133,28 @@ console.log('--- detection in a realistic room: blue stickers, bluish wall, navy
   near('hip closed', r.res.metrics.hipMin, tr.hip, 1.5);
   const p = sidePose(0, 1, 90);
   truthy('tap on a grey wall is refused', BF.learnColor(render(p, 3, null, ro), W, H, 320, 40) === null);
+}
+
+console.log('--- real room photos (kept out of git; skipped when absent)');
+{
+  const fs = require('fs'), path = require('path'), dir = path.join(__dirname, 'real');
+  const cases = [
+    // [file, stickers visible, positions at 720x960]; room1: the ankle sticker on the sock is in shadow and invisible
+    ['room1_960.rgba', [[367, 379], [337, 562], [368, 784]]],
+    ['room2_960.rgba', [[370, 391], [363, 593], [418, 803], [364, 859]]],
+  ];
+  cases.forEach(([f, pts]) => {
+    const file = path.join(dir, f);
+    if (!fs.existsSync(file)) { console.log('skip', f); return; }
+    const d = new Uint8ClampedArray(fs.readFileSync(file));
+    pts.forEach(([x, y], k) => {
+      const m0 = BF.learnColor(d, 720, 960, x, y); if (!m0) { truthy(`${f} tap ${k}: colour learned`, false); return; }
+      const m = BF.refineColor(d, 720, 960, m0), at = BF.autoTolerance(d, 720, 960, m, [4, 5, 7]);
+      const bl = BF.findBlobs(d, 720, 960, Object.assign({}, m, { tol: at.tol || 1 }));
+      const hit = pts.filter(p => bl.some(b => Math.hypot(b.x - p[0], b.y - p[1]) < 8)).length;
+      truthy(`${f} tap sticker ${k + 1}: ${pts.length} stickers found, nothing else`, hit === pts.length && bl.length === pts.length, `${bl.length} found, ${hit} real, tolerance ${at.tol || 1}`);
+    });
+  });
 }
 
 console.log('--- recommendation');
